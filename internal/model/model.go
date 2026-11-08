@@ -272,3 +272,11 @@ type AuditLog struct {
 	IP         string    `json:"ip"`
 	CreatedAt  time.Time `json:"created_at"`
 }
+
+// DefaultComposeVersion is the pinned Compose v2 release installed when a host
+// has no usable Compose. Pinning avoids depending on the GitHub releases API.
+const DefaultComposeVersion = "2.29.7"
+
+// SupportedComposeMajor reports whether the platform can orchestrate a host
+// with the given Compose major version.
+func SupportedComposeMajor(major int) bool { return major == 1 || major == 2 }
