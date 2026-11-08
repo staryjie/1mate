@@ -1,7 +1,6 @@
 package service
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,6 +17,8 @@ var (
 	ErrValidation = errors.New("validation failed")
 	ErrConflict  = errors.New("conflict")
 	ErrForbidden = errors.New("forbidden")
+	ErrUnreachable = errors.New("host unreachable")
+	ErrNoPrivilege = errors.New("no privilege escalation available")
 )
 
 // Service wires storage, crypto and the SSH transport into operations the API
@@ -139,17 +140,14 @@ func classifySSHError(err error) error {
 		return fmt.Errorf("%w: ssh authentication failed", ErrForbidden)
 	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "i/o timeout"),
 		strings.Contains(msg, "no such host"), strings.Contains(msg, "connect"):
-		return fmt.Errorf("%w: host unreachable", ErrValidation)
+		return fmt.Errorf("%w: %s", ErrUnreachable, err.Error())
 	}
 	return err
 }
 
-// jobContext is a lightweight helper for handlers that need both context and a
-// per-job SSH session.
+// closeQuietly closes an SSH client, ignoring the error on shutdown paths.
 func (s *Service) closeQuietly(c sshx.Client) {
 	if c != nil {
 		_ = c.Close()
 	}
 }
-
-var _ = context.Background

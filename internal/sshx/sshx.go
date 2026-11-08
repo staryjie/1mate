@@ -3,6 +3,7 @@ package sshx
 import (
 	"context"
 	"errors"
+	"io"
 	"time"
 )
 
@@ -39,8 +40,13 @@ type Client interface {
 	RunStreaming(ctx context.Context, cmd string, opts RunOptions, sink func(string)) (Result, error)
 	// Upload writes content to a path atomically (tmp + mv).
 	Upload(ctx context.Context, path, content string, mode string) error
+	// UploadReader streams r into path atomically without buffering it.
+	UploadReader(ctx context.Context, path string, r io.Reader, mode string, opts RunOptions) error
 	// Download streams a remote file to the writer, returning bytes copied.
-	Download(ctx context.Context, path string, w interface{ Write([]byte) (int, error) }) (int64, error)
+	Download(ctx context.Context, path string, w io.Writer) (int64, error)
+	// DownloadWithCommand streams the stdout of cmd to w, failing on a non-zero
+	// exit. It is used for pg_dump over SSH.
+	DownloadWithCommand(ctx context.Context, cmd string, opts RunOptions, w io.Writer) (int64, error)
 	Close() error
 }
 
@@ -75,12 +81,14 @@ type RunOptions struct {
 // Fake records commands and returns scripted results. Tests use it to assert
 // the exact command sequence without a remote machine.
 type Fake struct {
-	Fingerprint string
+	Fingerprint  string
 	// Handler may return a result and error for a command. When nil the fake
 	// returns exit 0 with empty output.
-	Handler func(cmd string) (Result, error)
-	Calls   []string
-	Uploads map[string]string
+	Handler      func(cmd string) (Result, error)
+	// DownloadData is returned verbatim by DownloadWithCommand.
+	DownloadData []byte
+	Calls        []string
+	Uploads      map[string]string
 }
 
 func NewFake(fingerprint string) *Fake {
@@ -116,7 +124,15 @@ func (f *Fake) Upload(ctx context.Context, path, content, mode string) error {
 	return nil
 }
 
-func (f *Fake) Download(ctx context.Context, path string, w interface{ Write([]byte) (int, error) }) (int64, error) {
+func (f *Fake) UploadReader(ctx context.Context, path string, r io.Reader, mode string, opts RunOptions) error {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	return f.Upload(ctx, path, string(data), mode)
+}
+
+func (f *Fake) Download(ctx context.Context, path string, w io.Writer) (int64, error) {
 	f.Calls = append(f.Calls, "download "+path)
 	data, ok := f.Uploads[path]
 	if !ok {
@@ -124,6 +140,48 @@ func (f *Fake) Download(ctx context.Context, path string, w interface{ Write([]b
 	}
 	n, err := w.Write([]byte(data))
 	return int64(n), err
+}
+
+func (f *Fake) DownloadWithCommand(ctx context.Context, cmd string, opts RunOptions, w io.Writer) (int64, error) {
+	f.Calls = append(f.Calls, "stream "+cmd)
+	if f.DownloadData != nil {
+		n, err := w.Write(f.DownloadData)
+		return int64(n), err
+	}
+	if f.Handler != nil {
+		res, err := f.Handler(cmd)
+		if err != nil {
+			return 0, err
+		}
+		if res.ExitCode != 0 {
+			return 0, errors.New("fake: command failed with exit " + itoa(res.ExitCode))
+		}
+		n, werr := w.Write([]byte(res.Stdout))
+		return int64(n), werr
+	}
+	return 0, nil
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
 }
 
 func (f *Fake) Close() error { return nil }

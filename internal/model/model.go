@@ -280,3 +280,11 @@ const DefaultComposeVersion = "2.29.7"
 // SupportedComposeMajor reports whether the platform can orchestrate a host
 // with the given Compose major version.
 func SupportedComposeMajor(major int) bool { return major == 1 || major == 2 }
+
+// AllJobKinds lists every job the platform understands.
+func AllJobKinds() []JobKind {
+	return []JobKind{
+		JobHostProbe, JobInstallDocker, JobDeploy, JobStart, JobStop, JobRestart,
+		JobUpgrade, JobBackup, JobRestore, JobDestroy, JobReconcile,
+	}
+}

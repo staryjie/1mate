@@ -235,7 +235,11 @@ func (d *Dialer) runWithInput(ctx context.Context, script, stdin string, timeout
 	return nil
 }
 
-func (d *Dialer) Download(ctx context.Context, path string, w interface{ Write([]byte) (int, error) }) (int64, error) {
+func (d *Dialer) Download(ctx context.Context, path string, w io.Writer) (int64, error) {
+	return d.DownloadWithCommand(ctx, "cat -- "+Quote(path), RunOptions{Timeout: 2 * time.Hour}, w)
+}
+
+func (d *Dialer) DownloadWithCommand(ctx context.Context, cmd string, opts RunOptions, w io.Writer) (int64, error) {
 	if err := d.connect(ctx); err != nil {
 		return 0, err
 	}
@@ -251,14 +255,77 @@ func (d *Dialer) Download(ctx context.Context, path string, w interface{ Write([
 	}
 	var stderr bytes.Buffer
 	session.Stderr = &stderr
-	if err := session.Start("cat -- " + Quote(path)); err != nil {
+	full := BuildCommand(cmd, opts)
+	if opts.Sudo.NeedsPassword() {
+		session.Stdin = strings.NewReader(opts.Sudo.Password + "\n")
+	}
+	if err := session.Start(full); err != nil {
 		return 0, err
 	}
-	n, copyErr := io.Copy(w, stdout)
-	if err := session.Wait(); err != nil && copyErr == nil {
-		copyErr = fmt.Errorf("remote read failed: %v: %s", err, stderr.String())
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 2 * time.Hour
 	}
-	return n, copyErr
+	type copyResult struct {
+		n   int64
+		err error
+	}
+	copied := make(chan copyResult, 1)
+	go func() {
+		n, err := io.Copy(w, stdout)
+		copied <- copyResult{n, err}
+	}()
+	select {
+	case <-ctx.Done():
+		_ = session.Signal(ssh.SIGKILL)
+		session.Close()
+		<-copied
+		return 0, ctx.Err()
+	case <-time.After(timeout):
+		_ = session.Signal(ssh.SIGKILL)
+		session.Close()
+		<-copied
+		return 0, fmt.Errorf("stream timed out after %s", timeout)
+	case cr := <-copied:
+		if err := session.Wait(); err != nil && cr.err == nil {
+			return cr.n, fmt.Errorf("remote command failed: %v: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		return cr.n, cr.err
+	}
+}
+
+func (d *Dialer) UploadReader(ctx context.Context, path string, r io.Reader, mode string, opts RunOptions) error {
+	if mode == "" {
+		mode = "0600"
+	}
+	if err := d.connect(ctx); err != nil {
+		return err
+	}
+	session, err := d.client.NewSession()
+	if err != nil {
+		d.reset()
+		return err
+	}
+	defer session.Close()
+	dir := path
+	if i := strings.LastIndex(path, "/"); i > 0 {
+		dir = path[:i]
+	}
+	script := fmt.Sprintf(
+		"set -e; mkdir -p -- %s; umask 077; cat > %s.1mate-tmp; chmod %s %s.1mate-tmp; mv -f %s.1mate-tmp %s",
+		Quote(dir), Quote(path), mode, Quote(path), Quote(path), Quote(path))
+	prelude := ""
+	if opts.Sudo.NeedsPassword() {
+		prelude = opts.Sudo.Password + "\n"
+	}
+	session.Stdin = io.MultiReader(strings.NewReader(prelude), r)
+	var stderr bytes.Buffer
+	session.Stdout = &stderr
+	session.Stderr = &stderr
+	if err := session.Run(BuildCommand(script, opts)); err != nil {
+		return fmt.Errorf("remote write failed: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 func (d *Dialer) Close() error {
