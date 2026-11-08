@@ -1,0 +1,30 @@
+# Build output
+/bin/
+/dist/
+/1mate
+/1mate.exe
+
+# Runtime data
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Web build artifacts
+/internal/webui/dist/
+
+# Frontend
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.local
+!.env.example
