@@ -39,7 +39,7 @@ func (s *Store) CreateJob(j *model.Job) error {
 }
 
 func (s *Store) GetJob(id string) (*model.Job, error) {
-	return s.scanJob(s.db.QueryRow(`SELECT ` + jobColumns + ` FROM jobs WHERE id = ?`))
+	return s.scanJob(s.db.QueryRow(`SELECT ` + jobColumns + ` FROM jobs WHERE id = ?`, id))
 }
 
 func (s *Store) ListJobs(filter JobFilter) ([]model.Job, error) {

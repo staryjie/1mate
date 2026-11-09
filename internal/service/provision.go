@@ -163,6 +163,7 @@ func (s *Service) RunInstallJob(ctx context.Context, p InstallPayload, log func(
 			log("%s", line)
 		}
 	})
+
 	if err != nil {
 		_ = s.Store.SetHostStatus(h.ID, model.HostUnknown, "installer interrupted: "+err.Error())
 		return classifySSHError(err)

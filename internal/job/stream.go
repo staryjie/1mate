@@ -3,6 +3,7 @@ package job
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,11 @@ func (l *LogSink) attach(stream *Stream) { l.stream = stream }
 
 // Printf writes a formatted, redacted line.
 func (l *LogSink) Printf(format string, args ...any) {
-	l.Write(format + "\n")
+	if len(args) == 0 {
+		l.Write(format + "\n")
+		return
+	}
+	l.Write(fmt.Sprintf(format, args...) + "\n")
 }
 
 // Write appends text, splitting it into lines so the SSE client receives
