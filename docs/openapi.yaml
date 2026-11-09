@@ -1,0 +1,646 @@
+openapi: 3.1.0
+info:
+  title: 1mate API
+  version: 0.1.0
+  description: |
+    TeslaMate 多实例一键部署平台。除了标注 public 的接口外，所有接口都需要会话
+    Cookie；写请求还必须携带 X-CSRF-Token 头（登录与 setup 返回 csrf_token）。
+servers:
+  - url: /api/v1
+tags:
+  - auth
+  - hosts
+  - instances
+  - backups
+  - jobs
+  - platform
+paths:
+  /auth/setup:
+    get:
+      operationId: getSetupStatus
+      tags: [auth]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  setup_required: { type: boolean }
+                  version: { type: string }
+    post:
+      operationId: setup
+      tags: [auth]
+      summary: 创建第一个管理员（仅当 setup_required 为 true）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        "201": { description: 已创建并登录 }
+        "409": { description: 已初始化 }
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+      responses:
+        "200":
+          description: 登录成功；响应包含 csrf_token 并设置会话 Cookie
+        "401": { description: 用户名或密码错误 }
+        "429": { description: 触发登录限流 }
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      responses: { "200": { description: 已退出 } }
+  /auth/me:
+    get:
+      operationId: me
+      tags: [auth]
+      responses:
+        "200":
+          description: 当前用户与 CSRF 令牌
+  /health:
+    get:
+      operationId: health
+      tags: [platform]
+      responses: { "200": { description: 平台存活 } }
+  /hosts:
+    get:
+      operationId: listHosts
+      tags: [hosts]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hosts:
+                    type: array
+                    items: { $ref: "#/components/schemas/Host" }
+    post:
+      operationId: createHost
+      tags: [hosts]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostInput" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Host" }
+        "400": { description: 校验失败 }
+        "409": { description: 名称冲突 }
+  /hosts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/HostID"
+    get:
+      operationId: getHost
+      tags: [hosts]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  host: { $ref: "#/components/schemas/Host" }
+                  capabilities: { $ref: "#/components/schemas/Capabilities" }
+    patch:
+      operationId: updateHost
+      tags: [hosts]
+      summary: 更新主机；提供新的 private_key/password 时轮换凭据
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostInput" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Host" }
+    delete:
+      operationId: deleteHost
+      tags: [hosts]
+      responses:
+        "200": { description: 已删除 }
+        "409": { description: 主机上仍有实例 }
+  /hosts/test-connection:
+    post:
+      operationId: testConnection
+      tags: [hosts]
+      summary: 保存前的 SSH 连接测试，返回主机指纹
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address, ssh_user]
+              properties:
+                address: { type: string }
+                ssh_port: { type: integer }
+                ssh_user: { type: string }
+                auth_type: { type: string, enum: [key, password] }
+                private_key: { type: string }
+                password: { type: string, format: password }
+                key_passphrase: { type: string, format: password }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  fingerprint: { type: string }
+                  message: { type: string }
+  /hosts/{id}/actions/probe:
+    post:
+      operationId: probeHost
+      tags: [hosts]
+      parameters:
+        - $ref: "#/components/parameters/HostID"
+      responses:
+        "202":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobRef" }
+  /hosts/{id}/capabilities:
+    get:
+      operationId: getCapabilities
+      tags: [hosts]
+      parameters:
+        - $ref: "#/components/parameters/HostID"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Capabilities" }
+        "404": { description: 尚未探测 }
+  /hosts/{id}/install-script:
+    get:
+      operationId: installScriptPreview
+      tags: [hosts]
+      parameters:
+        - $ref: "#/components/parameters/HostID"
+        - { name: strategy, in: query, schema: { type: string, enum: [repo, compose_only, script] } }
+        - { name: mirror, in: query, schema: { type: string, enum: ["", Aliyun, AzureChinaCloud] } }
+        - { name: docker_version, in: query, schema: { type: string } }
+        - { name: compose_version, in: query, schema: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  script: { type: string }
+                  options:
+                    type: object
+                    properties:
+                      strategy: { type: string }
+                      mirror: { type: string }
+                      docker_version: { type: string }
+                      compose_version: { type: string }
+  /hosts/{id}/actions/install-docker:
+    post:
+      operationId: installDocker
+      tags: [hosts]
+      summary: 一键安装 Docker Engine 与 Compose v2（需要 accept_system_changes）
+      parameters:
+        - $ref: "#/components/parameters/HostID"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accept_system_changes]
+              properties:
+                strategy: { type: string, enum: [repo, compose_only, script] }
+                docker_version: { type: string }
+                mirror: { type: string, enum: ["", Aliyun, AzureChinaCloud] }
+                compose_version: { type: string }
+                registry_mirrors:
+                  type: array
+                  items: { type: string, format: uri }
+                save_sudo_password: { type: string, format: password }
+                accept_system_changes: { type: boolean }
+      responses:
+        "202":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobRef" }
+        "400": { description: 未确认系统变更或选项非法 }
+        "403": { description: 无提权能力（E_NO_PRIVILEGE / E_SUDO_PASSWORD） }
+  /instances:
+    get:
+      operationId: listInstances
+      tags: [instances]
+      parameters:
+        - { name: host_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  instances:
+                    type: array
+                    items: { $ref: "#/components/schemas/Instance" }
+    post:
+      operationId: createInstance
+      tags: [instances]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstanceInput" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Instance" }
+        "400": { description: 校验失败（含端口冲突） }
+        "409": { description: slug 冲突 }
+  /instances/{id}:
+    parameters:
+      - $ref: "#/components/parameters/InstanceID"
+    get:
+      operationId: getInstance
+      tags: [instances]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Instance" }
+    patch:
+      operationId: updateInstance
+      tags: [instances]
+      summary: 更新实例配置；重新部署后生效
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InstanceInput" }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Instance" }
+    delete:
+      operationId: deleteInstanceRecord
+      tags: [instances]
+      summary: 仅移除平台记录；远程主机不改动；危险操作见 actions/destroy
+      responses:
+        "200": { description: 已移除 }
+        "409": { description: 有进行中的任务 }
+  /instances/{id}/compose:
+    get:
+      operationId: composePreview
+      tags: [instances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  compose: { type: string }
+                  env: { type: string, description: 已脱敏 }
+                  compose_kind: { type: string, enum: [plugin_v2, standalone_v2, standalone_v1] }
+                  command_prefix: { type: string }
+                  project_name: { type: string }
+                  base_dir: { type: string }
+  /instances/{id}/logs:
+    get:
+      operationId: instanceLogs
+      tags: [instances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+        - { name: tail, in: query, schema: { type: string, enum: ["50", "100", "200", "500", "1000"] } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  logs: { type: string }
+                  exit_code: { type: integer }
+  /instances/{id}/backups:
+    parameters:
+      - $ref: "#/components/parameters/InstanceID"
+    get:
+      operationId: listBackups
+      tags: [backups]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  backups:
+                    type: array
+                    items: { $ref: "#/components/schemas/Backup" }
+    post:
+      operationId: uploadBackup
+      tags: [backups]
+      summary: 上传 pg_dump 文件作为可恢复的备份
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file: { type: string, format: binary }
+                note: { type: string }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Backup" }
+  /instances/{id}/actions/{action}:
+    post:
+      operationId: instanceAction
+      tags: [instances]
+      parameters:
+        - $ref: "#/components/parameters/InstanceID"
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [deploy, start, stop, restart, upgrade, reconcile, backup, restore, destroy, reveal-key]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                backup_id: { type: string, description: restore 必填 }
+                purge_volumes: { type: boolean, description: destroy 可选；爆炸半径开关 }
+                confirm_slug: { type: string, description: purge_volumes 时必须匹配 slug }
+                note: { type: string, description: 备份备注 }
+      responses:
+        "202":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobRef" }
+        "400": { description: 参数校验失败（含 confirm_slug 不匹配） }
+        "409": { description: 该实例已有进行中的任务 }
+  /backups/{id}/download:
+    get:
+      operationId: downloadBackup
+      tags: [backups]
+      parameters:
+        - $ref: "#/components/parameters/BackupID"
+      responses:
+        "200":
+          content:
+            application/octet-stream: {}
+  /backups/{id}:
+    delete:
+      operationId: deleteBackup
+      tags: [backups]
+      parameters:
+        - $ref: "#/components/parameters/BackupID"
+      responses: { "200": { description: 已删除 } }
+  /jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      parameters:
+        - { name: host_id, in: query, schema: { type: string } }
+        - { name: instance_id, in: query, schema: { type: string } }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items: { $ref: "#/components/schemas/Job" }
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job: { $ref: "#/components/schemas/Job" }
+                  log: { type: string, description: 脱敏后的完整日志 }
+  /jobs/{id}/events:
+    get:
+      operationId: streamJob
+      tags: [jobs]
+      summary: SSE 日志流；data 为 {"text": "..."}，event done 结束
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          content:
+            text/event-stream: {}
+  /jobs/{id}/cancel:
+    post:
+      operationId: cancelJob
+      tags: [jobs]
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "202": { description: 已请求取消 }
+        "409": { description: 任务不在运行 }
+  /settings:
+    get:
+      operationId: getSettings
+      tags: [platform]
+      responses: { "200": { description: 当前设置 } }
+    patch:
+      operationId: updateSettings
+      tags: [platform]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: { type: string }
+              description: 仅接受 require_compose_v2 / compose_binary_version / default_pkg_mirror / compose_download_base_url
+      responses: { "200": { description: 已更新 } }
+  /audit-logs:
+    get:
+      operationId: auditLogs
+      tags: [platform]
+      responses: { "200": { description: 审计记录 } }
+components:
+  parameters:
+    HostID: { name: id, in: path, required: true, schema: { type: string } }
+    InstanceID: { name: id, in: path, required: true, schema: { type: string } }
+    BackupID: { name: id, in: path, required: true, schema: { type: string } }
+    JobID: { name: id, in: path, required: true, schema: { type: string } }
+  schemas:
+    JobRef:
+      type: object
+      properties:
+        job_id: { type: string }
+    Host:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        address: { type: string }
+        ssh_port: { type: integer }
+        ssh_user: { type: string }
+        auth_type: { type: string, enum: [key, password] }
+        host_key_fingerprint: { type: string }
+        sudo_mode: { type: string, enum: [none, root, nopasswd, password] }
+        status:
+          type: string
+          enum: [unknown, ok, unreachable, denied, host_key_changed, no_docker, no_compose, compose_v1, installing, unsupported, docker_socket_denied]
+        status_message: { type: string }
+        last_probe_at: { type: string, format: date-time, nullable: true }
+        instance_count: { type: integer }
+        capabilities: { $ref: "#/components/schemas/Capabilities" }
+    HostInput:
+      type: object
+      required: [name, address, ssh_user, auth_type]
+      properties:
+        name: { type: string, maxLength: 64 }
+        address: { type: string }
+        ssh_port: { type: integer, default: 22 }
+        ssh_user: { type: string }
+        auth_type: { type: string, enum: [key, password] }
+        private_key: { type: string, format: password }
+        password: { type: string, format: password }
+        key_passphrase: { type: string, format: password }
+        sudo_mode: { type: string, enum: [none, root, nopasswd, password] }
+        sudo_password: { type: string, format: password }
+        trust_fingerprint: { type: boolean, default: false }
+    Capabilities:
+      type: object
+      properties:
+        host_id: { type: string }
+        os_id: { type: string }
+        os_version: { type: string }
+        os_codename: { type: string }
+        os_pretty: { type: string }
+        arch: { type: string }
+        kernel: { type: string }
+        init_system: { type: string }
+        cpu_count: { type: integer }
+        mem_mb: { type: integer }
+        disk_free_kb: { type: integer }
+        docker_present: { type: boolean }
+        docker_client_version: { type: string }
+        docker_server_version: { type: string }
+        docker_running: { type: boolean }
+        docker_socket_access: { type: string, enum: [absent, ok, denied] }
+        docker_sudo: { type: boolean }
+        docker_rootless: { type: boolean }
+        compose_kind: { type: string, enum: [none, plugin_v2, standalone_v2, standalone_v1] }
+        compose_version: { type: string }
+        compose_major: { type: integer, enum: [0, 1, 2] }
+        compose_path: { type: string }
+        compose_v1_binary_present: { type: boolean }
+        ports_in_use: { type: array, items: { type: integer } }
+        unsupported_reason: { type: string }
+        probed_at: { type: string, format: date-time }
+    Instance:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        host_id: { type: string }
+        project_name: { type: string }
+        base_dir: { type: string }
+        bind_address: { type: string }
+        tm_port: { type: integer }
+        grafana_port: { type: integer }
+        mqtt_port: { type: integer }
+        timezone: { type: string }
+        region: { type: string, enum: [global, cn] }
+        image_tag: { type: string }
+        postgres_tag: { type: string }
+        grafana_admin_user: { type: string }
+        disable_mqtt: { type: boolean }
+        compose_major: { type: integer, enum: [1, 2] }
+        status:
+          type: string
+          enum: [created, deploying, running, degraded, stopped, failed, interrupted, deleted, unknown]
+        status_message: { type: string }
+        last_job_id: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        has_encryption_key: { type: boolean }
+    InstanceInput:
+      type: object
+      required: [name, slug, host_id, tm_port, grafana_port, mqtt_port]
+      properties:
+        name: { type: string, maxLength: 64 }
+        slug: { type: string, pattern: "^[a-z0-9][a-z0-9-]{1,30}$" }
+        host_id: { type: string }
+        base_dir: { type: string }
+        bind_address: { type: string, default: 0.0.0.0 }
+        tm_port: { type: integer }
+        grafana_port: { type: integer }
+        mqtt_port: { type: integer }
+        timezone: { type: string, default: UTC }
+        region: { type: string, enum: [global, cn], default: global }
+        image_tag: { type: string, default: latest }
+        postgres_tag: { type: string, default: 18-trixie }
+        grafana_admin_user: { type: string, default: admin }
+        disable_mqtt: { type: boolean, default: false }
+        extra_env:
+          type: object
+          additionalProperties: { type: string }
+          description: 受管理键（TM_DB_PASS 等）不可覆盖
+    Backup:
+      type: object
+      properties:
+        id: { type: string }
+        instance_id: { type: string }
+        filename: { type: string }
+        size_bytes: { type: integer }
+        sha256: { type: string }
+        format: { type: string, default: "fc" }
+        note: { type: string }
+        created_at: { type: string, format: date-time }
+    Job:
+      type: object
+      properties:
+        id: { type: string }
+        kind:
+          type: string
+          enum: [host_probe, install_docker, deploy, start, stop, restart, upgrade, backup, restore, destroy, reconcile]
+        host_id: { type: string }
+        instance_id: { type: string }
+        status: { type: string, enum: [queued, running, succeeded, failed, canceled, interrupted] }
+        stage: { type: string }
+        exit_code: { type: integer }
+        error: { type: string }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }

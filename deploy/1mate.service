@@ -1,0 +1,26 @@
+[Unit]
+Description=1mate - TeslaMate multi-instance deployment platform
+Documentation=https://github.com/your-org/1mate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=1mate
+Group=1mate
+ExecStart=/usr/local/bin/1mate
+EnvironmentFile=-/etc/1mate/1mate.env
+Restart=on-failure
+RestartSec=5s
+
+# Harden: the platform only needs its data dir and network access.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/1mate
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
