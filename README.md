@@ -33,6 +33,8 @@ make dev-web      # 可选：前端热更新代理 /api -> :8080
 
 ## 构建与部署
 
+完整部署文档（systemd / Docker / Compose 三种方式、主密钥管理、反向代理、升级与恢复）见 **`docs/deployment.md`**。要点：
+
 ```sh
 make build        # bin/1mate 单二进制（已内嵌前端）
 ```
@@ -109,4 +111,4 @@ docs/               openapi.yaml、runbook
 
 ## 运维手册
 
-日常操作、故障排查与升级流程见 `docs/runbook.md`。
+日常操作、故障排查与升级流程见 `docs/runbook.md`；部署流程见 `docs/deployment.md`。
