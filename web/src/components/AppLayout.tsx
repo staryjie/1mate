@@ -9,6 +9,7 @@ import {
   MenuUnfoldOutlined,
   SettingOutlined,
   ThunderboltOutlined,
+  UserOutlined,
 } from '@ant-design/icons'
 import { Button, Dropdown, Layout, Menu, Space, Tag, Typography } from 'antd'
 import { useAuth } from '../App'
@@ -18,7 +19,7 @@ const { Header, Sider, Content } = Layout
 const items = [
   { key: '/', icon: <AppstoreOutlined />, label: <Link to="/">总览</Link> },
   { key: '/hosts', icon: <CloudServerOutlined />, label: <Link to="/hosts">主机</Link> },
-  { key: '/instances/new', icon: <ThunderboltOutlined />, label: <Link to="/instances/new">新建实例</Link> },
+  { key: '/instances/new', icon: <ThunderboltOutlined />, label: <Link to="/instances/new">实例</Link> },
   { key: '/jobs', icon: <HistoryOutlined />, label: <Link to="/jobs">任务</Link> },
   { key: '/settings', icon: <SettingOutlined />, label: <Link to="/settings">设置</Link> },
 ]
@@ -31,7 +32,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
 
   const selected = (() => {
     const p = location.pathname
-    if (p.startsWith('/instances/new')) return '/instances/new'
+    if (p.startsWith('/instances/new') || p.startsWith('/instances/create')) return '/instances/new'
     if (p.startsWith('/instances/')) return '/'
     if (p.startsWith('/hosts')) return '/hosts'
     if (p.startsWith('/jobs')) return '/jobs'
@@ -84,6 +85,12 @@ export default function AppLayout({ children }: { children: ReactNode }) {
             <Dropdown
               menu={{
                 items: [
+                  {
+                    key: 'change_password',
+                    icon: <UserOutlined />,
+                    label: '修改密码',
+                    onClick: () => navigate('/instances/change-password'),
+                  },
                   {
                     key: 'logout',
                     icon: <LogoutOutlined />,

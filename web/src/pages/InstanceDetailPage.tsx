@@ -27,6 +27,7 @@ import {
   PauseCircleOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
+  RestOutlined,
   RocketOutlined,
   SyncOutlined,
   UploadOutlined,
@@ -35,6 +36,7 @@ import {
 import {
   useBackups,
   useComposePreview,
+  useHosts,
   useInstance,
   useInstanceAction,
   useJobs,
@@ -53,6 +55,7 @@ export default function InstanceDetailPage() {
   const navigate = useNavigate()
   const { message, modal } = App.useApp()
   const instance = useInstance(id)
+  const hosts = useHosts()
   const jobs = useJobs({ instance_id: id })
   const backups = useBackups(id)
   const preview = useComposePreview(id)
@@ -71,6 +74,12 @@ export default function InstanceDetailPage() {
   const [logsLoading, setLogsLoading] = useState(false)
   const [editForm] = Form.useForm()
   const inst = instance.data
+
+  const host = inst ? hosts.data?.hosts.find((h) => h.id === inst.host_id) : undefined
+  const hostIp = host?.address || ''
+
+  const tmUrl = inst && hostIp ? `http://${hostIp}:${inst!.tm_port}` : ''
+  const grafanaUrl = inst && hostIp ? `http://${hostIp}:${inst!.grafana_port}` : ''
 
   const run = async (name: Parameters<typeof action.mutateAsync>[0]['action'], body?: Record<string, unknown>) => {
     try {
@@ -175,11 +184,14 @@ export default function InstanceDetailPage() {
           <Button icon={<SyncOutlined />} onClick={() => void run('reconcile')} loading={busy}>
             对账
           </Button>
-          <Button icon={<PlayCircleOutlined />} onClick={() => void run('start')} loading={busy}>
+          <Button icon={<PlayCircleOutlined />} onClick={() => void run('start')} loading={busy} disabled={inst.status === 'running' || inst.status === 'deploying'}>
             启动
           </Button>
-          <Button icon={<PauseCircleOutlined />} onClick={() => void run('stop')} loading={busy}>
+          <Button icon={<PauseCircleOutlined />} onClick={() => void run('stop')} loading={busy} disabled={inst.status !== 'running'}>
             停止
+          </Button>
+          <Button icon={<RestOutlined />} onClick={() => void run('restart')} loading={busy} disabled={inst.status !== 'running'}>
+            重启
           </Button>
           <Button
             icon={<RocketOutlined />}
@@ -238,11 +250,16 @@ export default function InstanceDetailPage() {
                 <Card size="small">
                   <Descriptions bordered size="small" column={{ xs: 1, md: 2 }}>
                     <Descriptions.Item label="TeslaMate">
-                      <span className="mono">{inst.tm_port}</span>
-                      <CopyLinkButton url={`http://${inst.bind_address === '0.0.0.0' ? '主机IP' : inst.bind_address}:${inst.tm_port}`} />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="mono">{inst.tm_port}</span>
+                        {tmUrl && <CopyLinkButton url={tmUrl} />}
+                      </div>
                     </Descriptions.Item>
                     <Descriptions.Item label="Grafana">
-                      <span className="mono">{inst.grafana_port}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="mono">{inst.grafana_port}</span>
+                        {grafanaUrl && <CopyLinkButton url={grafanaUrl} />}
+                      </div>
                     </Descriptions.Item>
                     <Descriptions.Item label="MQTT">
                       {inst.disable_mqtt ? <Tag>已关闭</Tag> : <span className="mono">{inst.mqtt_port}</span>}
@@ -631,16 +648,48 @@ export default function InstanceDetailPage() {
 
 function CopyLinkButton({ url }: { url: string }) {
   const { message } = App.useApp()
+
+  const copyToClipboard = async (text: string): Promise<boolean> => {
+    // 优先使用现代 Clipboard API（HTTPS/localhost 下可用）
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text)
+        return true
+      } catch {
+        /* fall through to fallback */
+      }
+    }
+    // 降级：隐藏 textarea + execCommand（兼容 HTTP 环境）
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      return ok
+    } catch {
+      return false
+    }
+  }
+
   return (
     <Tooltip title="复制访问地址">
       <Button
         type="link"
         size="small"
         onClick={() => {
-          void navigator.clipboard.writeText(url).then(
-            () => message.success('已复制'),
-            () => message.warning('复制失败，请手动复制'),
-          )
+          void copyToClipboard(url).then((ok) => {
+            if (ok) {
+              message.success('已复制')
+            } else {
+              message.warning('复制失败，请手动复制')
+            }
+          })
         }}
       >
         {url}

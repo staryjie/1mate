@@ -69,10 +69,12 @@ func (h *harness) createHost(t *testing.T, sudoMode model.SudoMode) *model.Host 
 }
 
 // setProbeOutput makes the fake answer the probe script with the given output.
+// The probe is executed as `sh /tmp/1mate-probe-<random>.sh`, so the fake
+// detects that command and returns the scripted output.
 func (h *harness) setProbeOutput(t *testing.T, output string) {
 	t.Helper()
 	h.fake.Handler = func(cmd string) (sshx.Result, error) {
-		if strings.Contains(cmd, "IM_PROBE_DONE") || strings.Contains(cmd, "IM_OS_ID") || strings.Contains(cmd, "capability") {
+		if strings.Contains(cmd, "1mate-probe-") {
 			return sshx.Result{ExitCode: 0, Stdout: output}, nil
 		}
 		if strings.Contains(cmd, "cat --") {

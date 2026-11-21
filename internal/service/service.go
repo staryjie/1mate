@@ -136,10 +136,11 @@ func classifySSHError(err error) error {
 	msg := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(msg, "unable to authenticate"), strings.Contains(msg, "no supported methods"),
-		strings.Contains(msg, "permission denied"):
+		strings.Contains(msg, "permission denied"), strings.Contains(msg, "认证失败"), strings.Contains(msg, "权限被拒绝"):
 		return fmt.Errorf("%w: ssh authentication failed", ErrForbidden)
 	case strings.Contains(msg, "connection refused"), strings.Contains(msg, "i/o timeout"),
-		strings.Contains(msg, "no such host"), strings.Contains(msg, "connect"):
+		strings.Contains(msg, "no such host"), strings.Contains(msg, "connect"),
+		strings.Contains(msg, "连接被拒绝"), strings.Contains(msg, "连接超时"), strings.Contains(msg, "主机不可达"):
 		return fmt.Errorf("%w: %s", ErrUnreachable, err.Error())
 	}
 	return err

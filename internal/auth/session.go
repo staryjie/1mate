@@ -135,6 +135,28 @@ func (m *Manager) Authenticate(r *http.Request) (*model.Session, error) {
 	return sess, nil
 }
 
+func (m *Manager) ChangePassword(userID, oldPassword, newPassword string) error {
+	u, err := m.store.GetUserByID(userID)
+	if err != nil {
+		return ErrUnauthorized
+	}
+	if !VerifyPassword(u.PasswordHash, oldPassword) {
+		return ErrUnauthorized
+	}
+	hash, err := HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	if err := m.store.UpdateUserPassword(u.ID, hash); err != nil {
+		return err
+	}
+	// Invalidate all existing sessions for this user so they must re-login.
+	if _, err := m.store.DB().Exec(`DELETE FROM sessions WHERE user_id = ?`, u.ID); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (m *Manager) Logout(sess *model.Session) {
 	if sess != nil {
 		_ = m.store.DeleteSession(sess.ID)

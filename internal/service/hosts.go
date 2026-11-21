@@ -371,7 +371,21 @@ func (s *Service) ProbeHost(ctx context.Context, h *model.Host, logf func(string
 	}
 	defer s.closeQuietly(client)
 
-	res, err := client.Run(ctx, "sh -c "+sshx.Quote(probe.Script), sshx.RunOptions{
+	// Upload the probe script to a temp file, then execute it with `sh <file>`.
+	// Passing the script through `sh -c '...'` or `sh -s` breaks when the remote
+	// user's login shell is zsh: zsh cannot parse sshx.Quote's '\''
+	// escaping inside single quotes, corrupting the script (e.g. '#'
+	// comment lines become commands and OS_ID ends up empty). Uploading the
+	// script as a file and running `sh <file>` avoids all quoting issues.
+	probePath := "/tmp/1mate-probe-" + ids.New()[:8] + ".sh"
+	if err := client.UploadReader(ctx, probePath, strings.NewReader(probe.Script), "0755", sshx.RunOptions{
+		Timeout: 90 * time.Second,
+		Sudo:    sudo,
+	}); err != nil {
+		s.recordProbeFailure(h, err)
+		return nil, classifySSHError(err)
+	}
+	res, err := client.Run(ctx, "sh "+sshx.Quote(probePath), sshx.RunOptions{
 		Timeout: 90 * time.Second,
 		Sudo:    sudo,
 	})

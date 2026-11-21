@@ -6,6 +6,7 @@ import type {
   Capabilities,
   ComposePreviewData,
   Host,
+  ImportInstanceInput,
   Instance,
   Job,
   MeResponse,
@@ -212,5 +213,25 @@ export function useUploadBackup(instanceId: string) {
     mutationFn: ({ file, note }: { file: File; note?: string }) =>
       uploadFile<Backup>(`/api/v1/instances/${instanceId}/backups`, file, note ? { note } : {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['backups', instanceId] }),
+  })
+}
+
+export function useImportInstance() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: ImportInstanceInput) =>
+      api.post<Instance>('/api/v1/instances/import', payload),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['instances'] }),
+  })
+}
+
+export function useChangePassword() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: { old_password: string; new_password: string }) =>
+      api.post<{ ok: boolean }>('/api/v1/auth/change-password', payload),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['me'] })
+    },
   })
 }

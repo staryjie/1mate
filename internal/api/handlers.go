@@ -169,11 +169,38 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user":       userFrom(r.Context()),
-		"csrf_token": sess.CSRFToken,
+		"user":         userFrom(r.Context()),
+		"csrf_token":   sess.CSRFToken,
 		"setup_required": false,
-		"version":    s.version,
+		"version":      s.version,
 	})
+}
+
+type changePasswordReq struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	var req changePasswordReq
+	if !s.decode(w, r, &req) {
+		return
+	}
+	u := userFrom(r.Context())
+	if u == nil {
+		s.fail(w, http.StatusUnauthorized, CodeUnauthorized, "authentication required")
+		return
+	}
+	if err := s.auth.ChangePassword(u.ID, req.OldPassword, req.NewPassword); err != nil {
+		if errors.Is(err, auth.ErrUnauthorized) {
+			s.fail(w, http.StatusUnauthorized, CodeUnauthorized, "current password is incorrect")
+			return
+		}
+		s.failFrom(w, wrapValidation(err))
+		return
+	}
+	s.audit.Log(s.actor(r), "user.change_password", "user", u.ID, nil, r)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 // ---- hosts ----
@@ -409,6 +436,24 @@ func (s *Server) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, public)
 }
 
+func (s *Server) handleImportInstance(w http.ResponseWriter, r *http.Request) {
+	var in service.ImportInstanceInput
+	if !s.decode(w, r, &in) {
+		return
+	}
+	inst, err := s.svc.ImportInstance(in)
+	if err != nil {
+		s.failFrom(w, err)
+		return
+	}
+	public := publicInstance(inst)
+	s.audit.Log(s.actor(r), "instance.import", "instance", inst.ID, map[string]any{
+		"name": inst.Name, "slug": inst.Slug, "host_id": inst.HostID,
+		"base_dir": inst.BaseDir, "compose_major": inst.ComposeMajor,
+	}, r)
+	writeJSON(w, http.StatusCreated, public)
+}
+
 func (s *Server) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 	inst, err := s.store.GetInstance(r.PathValue("id"))
 	if err != nil {
@@ -491,6 +536,9 @@ type actionReq struct {
 	ConfirmSlug  string `json:"confirm_slug"`
 	BackupID     string `json:"backup_id"`
 	Note         string `json:"note"`
+	// PostgresTag is the target PostgreSQL major tag for upgrade actions.
+	// If empty, the current instance tag is kept (no major version change).
+	PostgresTag string `json:"postgres_tag"`
 }
 
 func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
@@ -502,7 +550,7 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req actionReq
-	if action == "destroy" || action == "restore" {
+	if action == "destroy" || action == "restore" || action == "upgrade" {
 		if !s.decode(w, r, &req) {
 			return
 		}
@@ -511,6 +559,12 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 	var kind model.JobKind
 	var payload string
 	switch action {
+	case "reveal-key":
+		writeJSON(w, http.StatusOK, map[string]any{
+			"tm_encryption_key": inst.TMEncryptionKey,
+			"notice":            "keep this key safe: restoring a backup into a new instance requires the same key",
+		})
+		return
 	case "deploy":
 		kind, payload = model.JobDeploy, service.MarshalPayload(service.SimplePayload{InstanceID: id})
 	case "start":
@@ -522,7 +576,11 @@ func (s *Server) handleInstanceAction(w http.ResponseWriter, r *http.Request) {
 	case "reconcile":
 		kind, payload = model.JobReconcile, service.MarshalPayload(service.SimplePayload{InstanceID: id})
 	case "upgrade":
-		if err := service.UpgradeGuard(inst.PostgresTag, inst.PostgresTag); err != nil {
+		newTag := req.PostgresTag
+		if newTag == "" {
+			newTag = inst.PostgresTag
+		}
+		if err := service.UpgradeGuard(inst.PostgresTag, newTag); err != nil {
 			s.failFrom(w, err)
 			return
 		}

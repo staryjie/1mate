@@ -48,6 +48,11 @@ func (s *Service) RunBackupJob(ctx context.Context, p BackupPayload, logf func(s
 	if err != nil {
 		return err
 	}
+	// Backward-compatible: instances imported/created before DBName was added
+	// may have an empty DBName. Fall back to slug-derived name (teslamate_<slug>).
+	if inst.DBName == "" {
+		inst.DBName = "teslamate_" + strings.ReplaceAll(inst.Slug, "-", "_")
+	}
 	dir := s.BackupDir(inst.ID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -82,9 +87,9 @@ func (s *Service) RunBackupJob(ctx context.Context, p BackupPayload, logf func(s
 	defer r.Close()
 
 	if logf != nil {
-		logf("dumping database %s from %s as custom format", inst.DBUser, inst.ProjectName)
+		logf("dumping database %s from %s as custom format", inst.DBName, inst.ProjectName)
 	}
-	cmd := r.cmd("exec -T database pg_dump -U " + sshx.Quote(inst.DBUser) + " -Fc " + sshx.Quote(inst.DBUser))
+	cmd := r.cmd("exec -T database pg_dump -U " + sshx.Quote(inst.DBUser) + " -Fc " + sshx.Quote(inst.DBName))
 	hasher := sha256.New()
 	mw := io.MultiWriter(f, hasher)
 	n, err := r.client.DownloadWithCommand(ctx, cmd, sshx.RunOptions{Timeout: 2 * time.Hour, Sudo: r.sudo}, mw)
@@ -262,7 +267,7 @@ func (s *Service) RunRestoreJob(ctx context.Context, p RestorePayload, logf func
 	}()
 
 	restoreCmd := fmt.Sprintf("exec -T database pg_restore --clean --if-exists --no-owner -U %s -d %s < %s",
-		sshx.Quote(inst.DBUser), sshx.Quote(inst.DBUser), sshx.Quote(remotePath))
+		sshx.Quote(inst.DBUser), sshx.Quote(inst.DBName), sshx.Quote(remotePath))
 	if logf != nil {
 		logf("restoring the database")
 	}

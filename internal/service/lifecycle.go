@@ -87,11 +87,11 @@ func (s *Service) deploy(ctx context.Context, inst *model.Instance, logf func(st
 	// against known-good content.
 	prevCompose, prevEnv := "", ""
 	if res, err := r.run(ctx, "true", 30*time.Second, nil); err == nil && res.ExitCode == 0 {
-		prevCompose, _ = s.readRemoteFile(ctx, r, inst.BaseDir+"/compose.yaml")
+		prevCompose, _ = s.readRemoteFile(ctx, r, inst.BaseDir+"/"+r.composeFile)
 		prevEnv, _ = s.readRemoteFile(ctx, r, inst.BaseDir+"/.env")
 	}
 
-	composePath := inst.BaseDir + "/compose.yaml"
+	composePath := inst.BaseDir + "/" + r.composeFile
 	envPath := inst.BaseDir + "/.env"
 	if err := r.client.Upload(ctx, composePath, composeBody, "0640"); err != nil {
 		return fmt.Errorf("upload compose.yaml: %w", classifySSHError(err))
@@ -103,7 +103,7 @@ func (s *Service) deploy(ctx context.Context, inst *model.Instance, logf func(st
 	if logf != nil {
 		logf("validating the compose configuration")
 	}
-	if res, err := r.run(ctx, "config -q", 2*time.Minute, nil); err != nil {
+	if res, err := r.run(ctx, "config -q", 5*time.Minute, nil); err != nil {
 		return classifySSHError(err)
 	} else if res.ExitCode != 0 {
 		s.restorePrevious(ctx, r, prevCompose, prevEnv, composePath, envPath)
@@ -113,7 +113,7 @@ func (s *Service) deploy(ctx context.Context, inst *model.Instance, logf func(st
 	if logf != nil {
 		logf("starting the stack")
 	}
-	res, err := r.run(ctx, "up -d --remove-orphans", 20*time.Minute, func(chunk string) {
+	res, err := r.run(ctx, "up -d --remove-orphans", 60*time.Minute, func(chunk string) {
 		if logf != nil {
 			for _, line := range strings.Split(strings.TrimRight(chunk, "\n"), "\n") {
 				if line != "" {
@@ -130,10 +130,15 @@ func (s *Service) deploy(ctx context.Context, inst *model.Instance, logf func(st
 		return fmt.Errorf("docker compose up failed (exit %d): %s", res.ExitCode, truncate(strings.TrimSpace(res.Stdout), 3000))
 	}
 
-	cp := *inst
-	cp.ComposeSHA256 = sum
-	cp.ComposeMajor = r.major
-	if err := s.Store.UpdateInstance(&cp); err != nil {
+	// Reload from store to preserve ciphertext secrets (inst has plaintext
+	// from GetInstance decryption). Only update ComposeSHA256 and ComposeMajor.
+	instDB, err := s.Store.GetInstance(inst.ID)
+	if err != nil {
+		return err
+	}
+	instDB.ComposeSHA256 = sum
+	instDB.ComposeMajor = r.major
+	if err := s.Store.UpdateInstance(instDB); err != nil {
 		return err
 	}
 	if logf != nil {
@@ -252,7 +257,7 @@ func (s *Service) reconcile(ctx context.Context, r *composeRunner, inst *model.I
 		logf("aggregated instance state: %s", status)
 	}
 
-	remoteCompose, err := s.readRemoteFile(ctx, r, inst.BaseDir+"/compose.yaml")
+	remoteCompose, err := s.readRemoteFile(ctx, r, inst.BaseDir+"/"+r.composeFile)
 	if err == nil && inst.ComposeSHA256 != "" {
 		if compose.Checksum(remoteCompose) != inst.ComposeSHA256 {
 			if logf != nil {
@@ -376,7 +381,7 @@ func (s *Service) RunUpgradeJob(ctx context.Context, payload string, logf func(s
 	if logf != nil {
 		logf("pulling images")
 	}
-	res, err := r.run(ctx, "pull", 30*time.Minute, stream)
+	res, err := r.run(ctx, "pull", 60*time.Minute, stream)
 	if err != nil {
 		return classifySSHError(err)
 	}
@@ -387,7 +392,7 @@ func (s *Service) RunUpgradeJob(ctx context.Context, payload string, logf func(s
 	if logf != nil {
 		logf("recreating containers")
 	}
-	res, err = r.run(ctx, "up -d --remove-orphans", 20*time.Minute, stream)
+	res, err = r.run(ctx, "up -d --remove-orphans", 60*time.Minute, stream)
 	if err != nil {
 		return classifySSHError(err)
 	}

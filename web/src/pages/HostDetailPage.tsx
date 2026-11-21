@@ -19,7 +19,7 @@ import {
   Tag,
   Typography,
 } from 'antd'
-import { DownloadOutlined, PlayCircleOutlined, ReloadOutlined, ToolOutlined } from '@ant-design/icons'
+import { DownloadOutlined, ImportOutlined, PlayCircleOutlined, ReloadOutlined, ToolOutlined } from '@ant-design/icons'
 import {
   useHost,
   useHostAction,
@@ -182,7 +182,7 @@ export default function HostDetailPage() {
           <Button type="primary" icon={<ToolOutlined />} onClick={() => openInstall('repo')}>
             {noDocker ? '一键安装 Docker + Compose' : noCompose ? '安装 Docker Compose' : '重新安装/升级'}
           </Button>
-          <Button icon={<PlayCircleOutlined />} onClick={() => navigate(`/instances/new?host=${host.id}`)}>
+          <Button icon={<PlayCircleOutlined />} onClick={() => navigate(`/instances/create?host=${host.id}`)}>
             新建实例
           </Button>
         </Space>
@@ -256,6 +256,14 @@ export default function HostDetailPage() {
             label: `实例 (${instances.data?.instances.length ?? 0})`,
             children: (
               <Space direction="vertical" style={{ width: '100%' }}>
+                <Space>
+                  <Button size="small" type="primary" onClick={() => navigate(`/instances/create?host=${host.id}`)}>
+                    新建实例
+                  </Button>
+                  <Button size="small" icon={<ImportOutlined />} onClick={() => navigate(`/instances/import?host=${host.id}`)}>
+                    导入现有实例
+                  </Button>
+                </Space>
                 {instances.data?.instances.length ? (
                   instances.data.instances.map((inst) => (
                     <Card
@@ -285,7 +293,7 @@ export default function HostDetailPage() {
                     showIcon
                     message="该主机还没有实例"
                     action={
-                      <Button size="small" type="primary" onClick={() => navigate(`/instances/new?host=${host.id}`)}>
+                      <Button size="small" type="primary" onClick={() => navigate(`/instances/create?host=${host.id}`)}>
                         新建实例
                       </Button>
                     }

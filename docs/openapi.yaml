@@ -64,6 +64,24 @@ paths:
       operationId: logout
       tags: [auth]
       responses: { "200": { description: 已退出 } }
+  /auth/change-password:
+    post:
+      operationId: changePassword
+      tags: [auth]
+      summary: 修改当前登录用户密码；成功后所有会话失效，需重新登录
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_password, new_password]
+              properties:
+                old_password: { type: string, format: password }
+                new_password: { type: string, format: password, minLength: 10 }
+      responses:
+        "200": { description: 密码已修改，所有会话失效，需重新登录 }
+        "400": { description: 校验失败（旧密码错误或新密码太短） }
+        "401": { description: 未登录 }
   /auth/me:
     get:
       operationId: me
@@ -374,6 +392,23 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Backup" }
+  /instances/import:
+    post:
+      operationId: importInstance
+      tags: [instances]
+      summary: 导入已在远程主机上运行的 TeslaMate 实例为 1mate 托管实例（只读远程配置，不重写远程文件）
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImportInstanceInput" }
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Instance" }
+        "400": { description: 校验失败（缺少必要密钥、端口冲突、slug 冲突等） }
+        "404": { description: 主机未找到或未探测 }
+        "409": { description: slug 冲突 }
   /instances/{id}/actions/{action}:
     post:
       operationId: instanceAction
@@ -396,6 +431,7 @@ paths:
                 purge_volumes: { type: boolean, description: destroy 可选；爆炸半径开关 }
                 confirm_slug: { type: string, description: purge_volumes 时必须匹配 slug }
                 note: { type: string, description: 备份备注 }
+                postgres_tag: { type: string, description: upgrade 时的目标 PostgreSQL 标签（如 18-trixie）；为空则保持当前标签 }
       responses:
         "202":
           content:
@@ -456,7 +492,7 @@ paths:
     get:
       operationId: streamJob
       tags: [jobs]
-      summary: SSE 日志流；data 为 {"text": "..."}，event done 结束
+      summary: "SSE 日志流；data 为 {\"text\": \"...\"}，event done 结束"
       parameters:
         - $ref: "#/components/parameters/JobID"
       responses:
@@ -616,6 +652,19 @@ components:
           type: object
           additionalProperties: { type: string }
           description: 受管理键（TM_DB_PASS 等）不可覆盖
+    ImportInstanceInput:
+      type: object
+      required: [name, slug, host_id, base_dir]
+      properties:
+        name: { type: string, maxLength: 64 }
+        slug: { type: string, pattern: "^[a-z0-9][a-z0-9-]{1,30}$" }
+        host_id: { type: string }
+        base_dir: { type: string, description: 远程主机上实例的配置目录，如 /opt/1mate/instances/mate01 }
+        compose_major: { type: integer, enum: [1, 2], description: 为空则从主机能力自动推断 }
+        tm_port: { type: integer, description: 为空则从 .env 读取 TM_TM_PORT }
+        grafana_port: { type: integer, description: 为空则从 .env 读取 TM_GRAFANA_PORT }
+        mqtt_port: { type: integer, description: 为空则从 .env 读取 TM_MQTT_PORT }
+        region: { type: string, enum: [global, cn], description: 为空则从 .env 读取 TM_REGION，再默认 global }
     Backup:
       type: object
       properties:

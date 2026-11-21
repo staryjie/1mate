@@ -15,6 +15,7 @@ import {
 import {
   CloudServerOutlined,
   DatabaseOutlined,
+  ImportOutlined,
   PlayCircleOutlined,
   PlusOutlined,
   WarningOutlined,
@@ -53,8 +54,11 @@ export default function OverviewPage() {
           <Button icon={<CloudServerOutlined />} onClick={() => navigate('/hosts')}>
             管理主机
           </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/instances/new')}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/instances/create')}>
             新建实例
+          </Button>
+          <Button icon={<ImportOutlined />} onClick={() => navigate('/instances/import')}>
+            导入现有实例
           </Button>
         </Space>
       </div>
@@ -153,7 +157,7 @@ export default function OverviewPage() {
         )}
       </Card>
 
-      <Card title="实例" extra={<Button size="small" onClick={() => navigate('/instances/new')}>新建</Button>}>
+      <Card title="实例" extra={<Button size="small" onClick={() => navigate('/instances/create')}>新建</Button>}>
         {instanceList.length === 0 ? (
           <Empty description="暂无实例" />
         ) : (

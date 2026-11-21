@@ -200,3 +200,15 @@ export interface ComposePreviewData {
   project_name: string
   base_dir: string
 }
+
+export interface ImportInstanceInput {
+  name: string
+  slug: string
+  host_id: string
+  base_dir: string
+  compose_major?: number
+  tm_port?: number
+  grafana_port?: number
+  mqtt_port?: number
+  region?: string
+}

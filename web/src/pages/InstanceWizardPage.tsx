@@ -19,7 +19,7 @@ import {
   Tag,
   Typography,
 } from 'antd'
-import { ArrowLeftOutlined, RocketOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, CloseOutlined, RocketOutlined } from '@ant-design/icons'
 import { useQueryClient } from '@tanstack/react-query'
 import { useComposePreview, useCreateInstance, useHosts } from '../api/hooks'
 import type { Instance } from '../api/types'
@@ -52,14 +52,17 @@ export default function InstanceWizardPage() {
   const [deployJob, setDeployJob] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [previewEnabled, setPreviewEnabled] = useState(false)
+  const [selectedHostId, setSelectedHostId] = useState<string>('')
 
-  const hostId = Form.useWatch('host_id', form)
   const slug = Form.useWatch('slug', form)
   const preview = useComposePreview(created?.id, previewEnabled || step === 2)
 
   useEffect(() => {
     const preset = search.get('host')
-    if (preset) form.setFieldsValue({ host_id: preset })
+    if (preset) {
+      form.setFieldsValue({ host_id: preset })
+      setSelectedHostId(preset)
+    }
     form.setFieldsValue({
       timezone: 'Asia/Shanghai',
       region: 'global',
@@ -72,8 +75,8 @@ export default function InstanceWizardPage() {
   }, [search, form])
 
   const selectedHost = useMemo(
-    () => hosts.data?.hosts.find((h) => h.id === hostId),
-    [hosts.data, hostId],
+    () => hosts.data?.hosts.find((h) => h.id === selectedHostId),
+    [hosts.data, selectedHostId],
   )
 
   const hostOptions = useMemo(
@@ -109,7 +112,7 @@ export default function InstanceWizardPage() {
       const payload = {
         name: values.name,
         slug: values.slug,
-        host_id: values.host_id,
+        host_id: selectedHostId,
         bind_address: values.bind_address || '0.0.0.0',
         tm_port: values.tm_port,
         grafana_port: values.grafana_port,
@@ -168,6 +171,24 @@ export default function InstanceWizardPage() {
     }
   }
 
+  const cancel = async () => {
+    if (created) {
+      if (!window.confirm('已创建实例记录，取消将删除该记录，确定吗？')) return
+      setSubmitting(true)
+      try {
+        await api.del(`/api/v1/instances/${created.id}`)
+      } catch {
+        /* ignore delete errors, just reset state */
+      } finally {
+        setSubmitting(false)
+      }
+    }
+    setCreated(null)
+    setDeployJob('')
+    setStep(0)
+    navigate('/instances')
+  }
+
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <div className="page-header">
@@ -211,6 +232,11 @@ export default function InstanceWizardPage() {
                 placeholder="选择已探测可用的主机"
                 options={hostOptions}
                 notFoundContent="暂无可用主机，请先添加并探测"
+                value={selectedHostId || undefined}
+                onChange={(val) => {
+                  setSelectedHostId(val)
+                  form.setFieldsValue({ host_id: val })
+                }}
               />
             </Form.Item>
           )}
@@ -335,7 +361,18 @@ export default function InstanceWizardPage() {
 
       {step < 3 && (
         <Space>
-          {step > 0 && <Button onClick={() => setStep(step - 1)}>上一步</Button>}
+          {step > 0 && (
+            <>
+              <Button onClick={() => setStep(step - 1)}>上一步</Button>
+              <Button
+                icon={<CloseOutlined />}
+                danger
+                onClick={cancel}
+              >
+                取消
+              </Button>
+            </>
+          )}
           {step === 0 && (
             <Button type="primary" onClick={() => void next()}>
               下一步

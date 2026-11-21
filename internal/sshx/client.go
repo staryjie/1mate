@@ -119,7 +119,11 @@ func (d *Dialer) HostKeyFingerprint() string {
 
 func (d *Dialer) Run(ctx context.Context, cmd string, opts RunOptions) (Result, error) {
 	var buf bytes.Buffer
-	return d.run(ctx, cmd, opts, &buf)
+	res, err := d.run(ctx, cmd, opts, &buf)
+	if err == nil {
+		res.Stdout = buf.String()
+	}
+	return res, err
 }
 
 func (d *Dialer) RunStreaming(ctx context.Context, cmd string, opts RunOptions, sink func(string)) (Result, error) {
@@ -340,7 +344,11 @@ func (d *Dialer) Close() error {
 }
 
 // BuildCommand joins the caller prefix, the sudo prefix and the command. When
-// sudo needs a password the command is wrapped so sudo reads it from stdin.
+// sudo needs a password the command is prefixed with `sudo -S -p ''` so sudo
+// reads the password from stdin (supplied by Dialer.run). The command runs
+// directly through the remote login shell — no `sh -c` wrapping — because
+// zsh (used as root's login shell on some hosts) cannot parse the
+// `'\''` single-quote escaping produced by Quote().
 func BuildCommand(cmd string, opts RunOptions) string {
 	inner := cmd
 	if p := opts.Sudo.Prefix(); p != "" {
@@ -348,7 +356,7 @@ func BuildCommand(cmd string, opts RunOptions) string {
 	}
 	full := opts.Prefix + inner
 	if opts.Sudo.NeedsPassword() {
-		full = opts.Prefix + "sudo -S -p '' sh -c " + Quote(inner)
+		full = opts.Prefix + "sudo -S -p '' " + inner
 	}
 	return full
 }

@@ -187,6 +187,7 @@ type Instance struct {
 	DisableMQTT      bool           `json:"disable_mqtt"`
 	ExtraEnv         map[string]string `json:"extra_env"`
 	TMEncryptionKey  string         `json:"-"`
+	DBName           string         `json:"db_name"`
 	DBUser           string         `json:"db_user"`
 	DBPass           string         `json:"-"`
 	GrafanaPass      string         `json:"-"`

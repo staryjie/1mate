@@ -29,6 +29,7 @@ func Router(s *Server, webFS fs.FS, corsAllowed string) http.Handler {
 
 	// Authenticated session info.
 	api(http.MethodGet, "/api/v1/auth/me", s.handleMe, false)
+	api(http.MethodPost, "/api/v1/auth/change-password", s.handleChangePassword, false)
 
 	// Hosts.
 	api(http.MethodGet, "/api/v1/hosts", s.handleListHosts, false)
@@ -45,6 +46,7 @@ func Router(s *Server, webFS fs.FS, corsAllowed string) http.Handler {
 	// Instances.
 	api(http.MethodGet, "/api/v1/instances", s.handleListInstances, false)
 	api(http.MethodPost, "/api/v1/instances", s.handleCreateInstance, false)
+	api(http.MethodPost, "/api/v1/instances/import", s.handleImportInstance, false)
 	api(http.MethodGet, "/api/v1/instances/{id}", s.handleGetInstance, false)
 	api(http.MethodPatch, "/api/v1/instances/{id}", s.handleUpdateInstance, false)
 	api(http.MethodDelete, "/api/v1/instances/{id}", s.handleDeleteInstance, false)

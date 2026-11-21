@@ -11,7 +11,10 @@ import OverviewPage from './pages/OverviewPage'
 import HostsPage from './pages/HostsPage'
 import HostDetailPage from './pages/HostDetailPage'
 import InstanceWizardPage from './pages/InstanceWizardPage'
+import InstanceImportPage from './pages/InstanceImportPage'
 import InstanceDetailPage from './pages/InstanceDetailPage'
+import InstancesListPage from './pages/InstancesListPage'
+import ChangePasswordPage from './pages/ChangePasswordPage'
 import JobsPage from './pages/JobsPage'
 import SettingsPage from './pages/SettingsPage'
 
@@ -118,8 +121,12 @@ export default function App() {
                   <Route path="/" element={<OverviewPage />} />
                   <Route path="/hosts" element={<HostsPage />} />
                   <Route path="/hosts/:id" element={<HostDetailPage />} />
-                  <Route path="/instances/new" element={<InstanceWizardPage />} />
+                  <Route path="/instances" element={<Navigate to="/instances/new" replace />} />
+                  <Route path="/instances/new" element={<InstancesListPage />} />
+                  <Route path="/instances/create" element={<InstanceWizardPage />} />
+                  <Route path="/instances/import" element={<InstanceImportPage />} />
                   <Route path="/instances/:id" element={<InstanceDetailPage />} />
+                  <Route path="/instances/change-password" element={<ChangePasswordPage />} />
                   <Route path="/jobs" element={<JobsPage />} />
                   <Route path="/jobs/:id" element={<JobsPage />} />
                   <Route path="/settings" element={<SettingsPage />} />
