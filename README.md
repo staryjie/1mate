@@ -111,4 +111,4 @@ docs/               openapi.yaml、runbook
 
 ## 运维手册
 
-日常操作、故障排查与升级流程见 `docs/runbook.md`；部署流程见 `docs/deployment.md`。
+日常操作、故障排查与升级流程见 `docs/runbook.md`；部署流程见 `docs/deployment.md`；开发者文档（架构、设计决策、测试与调试）见 `docs/development.md`。
