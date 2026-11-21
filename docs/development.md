@@ -150,6 +150,182 @@ cd web && npm run test -- --run    # vitest
 
 ---
 
+## 6.1 版本管理与打 Tag
+
+### 6.1.1 版本号规则（语义化版本 SemVer）
+
+格式 `vMAJOR.MINOR.PATCH`：
+
+| 位 | 何时递增 | 示例 |
+|---|---|---|
+| MAJOR | 不兼容的 API/数据模型变更（如迁移破坏旧库、接口删除改名） | v1.0.0 → v2.0.0 |
+| MINOR | 向后兼容的新功能 | v1.0.0 → v1.1.0 |
+| PATCH | 向后兼容的缺陷修复 | v1.1.0 → v1.1.1 |
+
+预发布版：`v1.1.0-rc.1` / `v1.1.0-beta.1`（正式版发出前验证用）。
+
+### 6.1.2 打 Tag 流程
+
+```sh
+# 0. 前置确认：工作区干净、测试全绿
+git status --short                 # 应无未提交变更
+make test                          # Go + 前端全部测试
+make vet
+
+# 1. 更新 CHANGELOG.md（若有）：把 "未发布" 段落改为本次版本号与日期
+
+# 2. 打 annotated tag（annotated 而非 lightweight：带作者/日期/说明，release 语义）
+git tag -a v1.0.0 -m "1mate v1.0.0: 首个正式版本"
+
+# 3. 推送 tag（注意：push 默认不带 tag，必须显式推）
+git push origin master
+git push origin v1.0.0             # 或 git push origin --tags（谨慎：会把所有本地 tag 推上去）
+
+# 4. 删除 tag（打错了）
+git tag -d v1.0.0                  # 删本地
+git push origin :refs/tags/v1.0.0  # 删远端
+```
+
+**打 tag 后马上验证版本注入**（tag 名会经 `git describe` 进入二进制）：
+
+```sh
+make backend                       # 构建，VERSION 自动 = git describe --tags --always --dirty
+./bin/1mate &                      # 启动
+curl -fsS http://127.0.0.1:8080/api/v1/health   # "version":"v1.0.0" 而非 "dev"
+```
+
+> `git describe` 规则：从 HEAD 向上找最近的 tag——HEAD 恰好在 tag 上 → `v1.0.0`；在 tag 后有 N 个提交 → `v1.0.0-N-g<hash>`；工作区有未提交变更 → 追加 `-dirty`。所以 health 端点显示的版本号可以精确定位构建来源。
+
+### 6.1.3 版本注入机制
+
+`Makefile` 通过 `-ldflags -X` 在**编译期**把版本写进 `internal/version` 包的变量：
+
+```make
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w \
+	-X 1mate/internal/version.Version=$(VERSION) \
+	-X 1mate/internal/version.Commit=$(COMMIT) \
+	-X 1mate/internal/version.Date=$(DATE)
+```
+
+`internal/version/version.go` 里是三个默认值 `dev` / `none` / `unknown`——直接 `go build` 不带 ldflags 时 health 显示 `dev`，便于识别"非正式构建"。
+
+**原则：版本号只在编译期确定，运行时不可变。** 不要在代码里写死版本，一切以 `internal/version` 为单一来源。
+
+### 6.1.4 Docker 镜像 tag
+
+```sh
+docker build -f deploy/Dockerfile -t 1mate:v1.0.0 -t 1mate:latest \
+  --build-arg VERSION=v1.0.0 --build-arg COMMIT=$(git rev-parse --short HEAD) .
+```
+
+`--build-arg VERSION` 必须显式传（Dockerfile 内 `ARG VERSION=dev`），否则镜像里也是 `dev`。
+
+---
+
+## 6.2 跨平台编译
+
+### 6.2.1 支持矩阵
+
+| 目标平台 | GOOS/GOARCH | CGO | 用途 |
+|---|---|---|---|
+| Linux amd64 | `linux/amd64` | 0 | 绝大多数服务器（主力目标） |
+| Linux arm64 | `linux/arm64` | 0 | ARM 服务器 / 树莓派 5 / Apple Silicon 虚拟机 |
+| macOS (开发) | `darwin/arm64` `darwin/amd64` | 0 | 本地开发调试 |
+| Windows (开发) | `windows/amd64` | 0 | 本地开发调试 |
+| ~~linux/armv7~~ | — | — | **不支持**：TeslaMate 官方镜像已放弃 32 位 ARM，probe 会直接拒绝 |
+
+1mate 是纯 Go + `CGO_ENABLED=0`（SQLite 用纯 Go 驱动），可以无限制交叉编译，产物是**静态二进制**，任何同架构 Linux 上直接跑，无运行时依赖。
+
+### 6.2.2 Linux/macOS 下交叉编译
+
+```sh
+# Linux amd64（发布主力产物）
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags "-s -w -X 1mate/internal/version.Version=$(git describe --tags --always)" \
+  -o bin/1mate-linux-amd64 ./cmd/1mate
+
+# Linux arm64
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+  go build -trimpath -ldflags "-s -w -X 1mate/internal/version.Version=$(git describe --tags --always)" \
+  -o bin/1mate-linux-arm64 ./cmd/1mate
+
+# 一条命令构建两个（Go ≥1.15 支持 GOARCH 列表不适用 build，用循环）
+for arch in amd64 arm64; do
+  CGO_ENABLED=0 GOOS=linux GOARCH=$arch \
+    go build -trimpath -ldflags "-s -w" -o bin/1mate-linux-$arch ./cmd/1mate
+done
+```
+
+ldflags 说明：`-s -w` 去符号表（体积减 ~30%）；`-trimpath` 去掉本机路径（可复现构建 + 不泄露构建机目录）。
+
+### 6.2.3 Windows 下交叉编译（⚠️ 三个经典坑）
+
+**坑 1：PowerShell 临时环境变量语法失效。** `$env:GOOS="linux"; go build ...` 在某些调用链下不生效，产物是 Windows PE。**推荐用 cmd 包一层**：
+
+```powershell
+cmd /c "set CGO_ENABLED=0&&set GOOS=linux&&set GOARCH=amd64&&go build -trimpath -ldflags `"-s -w`" -o bin/1mate-linux ./cmd/1mate"
+```
+
+**坑 2：忘了验证产物。** 编译完必须确认 ELF 头（Windows PE 装到 Linux 服务器会 `systemd 203/EXEC` 起不来）：
+
+```powershell
+Get-Content bin/1mate-linux -TotalCount 1 -Encoding Byte -AsByteStream |
+  Select-Object -First 4 | ForEach-Object { $_.ToString("X2") }
+# 正确输出：7F 45 4C 46  (即 \x7fELF)
+```
+
+（历史教训：本项目曾因坑 1 部署 Windows PE 到服务器导致 `203/EXEC`。）
+
+**坑 3：`&&` 在 PowerShell 5.x 里不是命令连接符。** 上面命令整体包在 `cmd /c "..."` 里所以没问题；拆开写就要改用 `;`。
+
+### 6.2.4 验证产物清单
+
+发版前对每个产物检查：
+
+```sh
+file bin/1mate-linux-amd64
+# 期望: ELF 64-bit LSB executable, x86-64, statically linked, Go BuildID=..., not stripped
+ls -lh bin/           # 静态单文件，约 19-20MB（含内嵌前端）
+./bin/1mate-linux-amd64 &   # 在对应平台试跑
+curl -fsS http://127.0.0.1:8080/api/v1/health   # 版本号正确
+```
+
+### 6.2.5 发布产物命名建议
+
+```
+1mate-v1.0.0-linux-amd64.tar.gz     # tar 包内含二进制 + README + LICENSE
+1mate-v1.0.0-linux-arm64.tar.gz
+1mate_v1.0.0_checksums.txt          # sha256sum 供下载方校验
+```
+
+打包示例：
+
+```sh
+VERSION=v1.0.0
+tar -czf 1mate-$VERSION-linux-amd64.tar.gz -C bin 1mate-linux-amd64
+sha256sum 1mate-$VERSION-*.tar.gz > 1mate_$VERSION_checksums.txt
+```
+
+---
+
+## 6.3 发版检查清单（Release Checklist）
+
+- [ ] `git status` 干净，所有变更已提交
+- [ ] `make test` 全绿（Go + 前端）
+- [ ] `make vet` 无告警
+- [ ] CHANGELOG.md 已更新本版本条目
+- [ ] 真实主机 E2E 通过（创建→部署→启停→备份→销毁，参照 deployment.md）
+- [ ] 打 annotated tag，推送
+- [ ] `make backend` 后 health 端点显示新版本号（非 `dev`）
+- [ ] 跨平台产物构建并通过 `file` 验证（ELF 头）
+- [ ] Docker 镜像 `--build-arg VERSION` 正确传入
+- [ ] GitHub Release（若有）：附产物 + checksums + CHANGELOG 摘录
+
+---
+
 ## 7. 添加功能的典型路径
 
 以"给实例动作加一种"为例：
