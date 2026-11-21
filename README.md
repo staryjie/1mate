@@ -3,6 +3,8 @@
 TeslaMate 多实例一键部署平台。通过 SSH 管理 Linux 主机，探测并按需安装 Docker 与
 Docker Compose v2，在 Web 界面完成实例的创建、部署、启停、升级、备份与销毁。
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ## 能力概览
 
 - **主机管理**：SSH 凭据加密存储，主机指纹（TOFU）固定，一键能力探测（发行版 /
