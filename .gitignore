@@ -29,3 +29,8 @@ Thumbs.db
 .env
 .env.local
 !.env.example
+
+# Logs and scratch files
+*.log
+.tmpdata.*
+

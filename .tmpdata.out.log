@@ -1,7 +1,0 @@
-time=2026-11-09T20:40:26.032+08:00 level=WARN msg="generated a new master key; back it up, without it stored secrets cannot be decrypted" path=D:\Code\GoCode\practices\1mate\.tmpdata\master.key
-time=2026-11-09T20:40:26.089+08:00 level=INFO msg="1mate starting" addr=127.0.0.1:18080 version=dev data_dir=D:\Code\GoCode\practices\1mate\.tmpdata
-time=2026-11-09T20:40:29.153+08:00 level=INFO msg=request method=POST path=/api/v1/auth/setup status=201 duration=80.5341ms
-time=2026-11-09T20:40:29.174+08:00 level=INFO msg=request method=GET path=/api/v1/auth/me status=200 duration=713µs
-time=2026-11-09T20:40:29.257+08:00 level=INFO msg=request method=POST path=/api/v1/hosts status=201 duration=6.8774ms
-time=2026-11-09T20:40:29.274+08:00 level=INFO msg=request method=POST path=/api/v1/hosts/01a1c053-0745-7c73-9e37-2da29cde1ae5/actions/probe status=202 duration=4.289ms
-time=2026-11-09T20:40:51.301+08:00 level=INFO msg=request method=GET path=/api/v1/jobs/01a1c053-0755-7f28-a7a1-1b9401bde195 status=200 duration=716.5µs
