@@ -91,8 +91,10 @@ func (s *Service) ImagePrecheck(hostID string, images []string) ([]ImagePrecheck
 			return nil, err
 		}
 	}
+	// 没有实例时没有「所需镜像」可推导 —— 允许调用方显式传入 images 逐个
+	// 检查；两者都为空则返回空结果而非错误，前端显示空状态即可。
 	if len(images) == 0 {
-		return nil, fmt.Errorf("%w: no instances on this host; nothing to precheck", ErrValidation)
+		return []ImagePrecheckResult{}, nil
 	}
 
 	client, sudo, err := s.Connect(h)
