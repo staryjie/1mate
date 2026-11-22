@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Alert,
   Button,
@@ -20,6 +21,7 @@ import type { ImagePrecheckResult } from '../api/types'
 // 数据经源主机 docker save → SSH → 目标主机 docker load，不在平台落盘。
 // 也支持手动输入任意镜像引用（例如给还没有实例的新主机预同步镜像）。
 export default function ImageSyncPanel({ hostId }: { hostId: string }) {
+  const navigate = useNavigate()
   const [syncOpen, setSyncOpen] = useState(false)
   const [sourceHostId, setSourceHostId] = useState<string | undefined>()
   const [manualImages, setManualImages] = useState('')
@@ -65,7 +67,7 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
           message.success('同步任务已启动')
           setSyncOpen(false)
           setManualImages('')
-          window.location.href = `/jobs/${res.job_id}`
+          navigate(`/jobs/${res.job_id}`)
         },
         onError: (e) => message.error(`启动失败: ${String(e)}`),
       },

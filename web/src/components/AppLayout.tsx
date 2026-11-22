@@ -32,8 +32,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
 
   const selected = (() => {
     const p = location.pathname
-    if (p.startsWith('/instances/new') || p.startsWith('/instances/create')) return '/instances/new'
-    if (p.startsWith('/instances/')) return '/'
+    if (p.startsWith('/instances/')) return '/instances/new'
     if (p.startsWith('/hosts')) return '/hosts'
     if (p.startsWith('/jobs')) return '/jobs'
     if (p.startsWith('/settings')) return '/settings'
