@@ -718,6 +718,28 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
 }
 
+// handleRetryJob 用原任务的同种类型、目标与 payload 重新提交一个新任务。
+// 只允许对已结束（成功/失败/取消/中断）的任务重试。
+func (s *Server) handleRetryJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	j, err := s.store.GetJob(id)
+	if err != nil {
+		s.failFrom(w, err)
+		return
+	}
+	if !j.Status.Terminal() {
+		s.fail(w, http.StatusConflict, CodeConflict, "the job is still running")
+		return
+	}
+	nj, err := s.jobs.Submit(j.Kind, j.HostID, j.InstanceID, j.Payload, s.actor(r))
+	if err != nil {
+		s.mapJobErr(w, err)
+		return
+	}
+	s.audit.Log(s.actor(r), "job.retry", "job", id, map[string]any{"new_job_id": nj.ID}, r)
+	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": nj.ID})
+}
+
 // ---- misc ----
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

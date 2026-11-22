@@ -1,6 +1,6 @@
 import { useNavigate, useParams } from 'react-router-dom'
 import { Alert, App, Button, Card, Empty, Space, Table, Typography } from 'antd'
-import { CloseCircleOutlined, ReloadOutlined } from '@ant-design/icons'
+import { CloseCircleOutlined, RedoOutlined, ReloadOutlined } from '@ant-design/icons'
 import { useJob, useJobs } from '../api/hooks'
 import { api } from '../api/client'
 import { JobStatusTag, jobKindLabel } from '../components/StatusTags'
@@ -52,6 +52,23 @@ export default function JobsPage() {
                 }}
               >
                 取消任务
+              </Button>
+            )}
+            {current && current.status !== 'running' && current.status !== 'queued' && (
+              <Button
+                icon={<RedoOutlined />}
+                type="primary"
+                onClick={async () => {
+                  try {
+                    const res = await api.post<{ job_id: string }>(`/api/v1/jobs/${id}/retry`, {})
+                    message.success('已用原参数重新提交')
+                    navigate(`/jobs/${res.job_id}`)
+                  } catch (err) {
+                    message.error((err as Error).message)
+                  }
+                }}
+              >
+                重试任务
               </Button>
             )}
           </Space>
@@ -131,6 +148,31 @@ export default function JobsPage() {
                 const secs = Math.max(0, Math.round((end - new Date(r.started_at).getTime()) / 1000))
                 return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`
               },
+            },
+            {
+              title: '操作',
+              width: 90,
+              render: (_, r) =>
+                r.status !== 'running' && r.status !== 'queued' ? (
+                  <Button
+                    size="small"
+                    icon={<RedoOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      void (async () => {
+                        try {
+                          const res = await api.post<{ job_id: string }>(`/api/v1/jobs/${r.id}/retry`, {})
+                          message.success('已用原参数重新提交')
+                          navigate(`/jobs/${res.job_id}`)
+                        } catch (err) {
+                          message.error((err as Error).message)
+                        }
+                      })()
+                    }}
+                  >
+                    重试
+                  </Button>
+                ) : null,
             },
           ]}
         />

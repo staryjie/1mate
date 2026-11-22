@@ -69,6 +69,7 @@ func Router(s *Server, webFS fs.FS, corsAllowed string) http.Handler {
 	api(http.MethodGet, "/api/v1/jobs/{id}", s.handleGetJob, false)
 	api(http.MethodGet, "/api/v1/jobs/{id}/events", s.handleJobEvents, false)
 	api(http.MethodPost, "/api/v1/jobs/{id}/cancel", s.handleCancelJob, false)
+	api(http.MethodPost, "/api/v1/jobs/{id}/retry", s.handleRetryJob, false)
 
 	// Settings and audit.
 	api(http.MethodGet, "/api/v1/settings", s.handleSettings, false)
