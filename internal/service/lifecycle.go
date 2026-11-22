@@ -93,6 +93,42 @@ func (s *Service) deploy(ctx context.Context, inst *model.Instance, logf func(st
 
 	composePath := inst.BaseDir + "/" + r.composeFile
 	envPath := inst.BaseDir + "/.env"
+
+	// Imported instances: 1mate takes over management without touching the
+	// remote compose/.env files. Only run `docker compose up -d` against the
+	// existing files on the host.
+	if inst.Source == model.InstanceSourceImported {
+		if logf != nil {
+			logf("imported instance: reusing existing compose/.env files on host")
+		}
+		res, err := r.run(ctx, "up -d --remove-orphans", 60*time.Minute, func(chunk string) {
+			if logf != nil {
+				for _, line := range strings.Split(strings.TrimRight(chunk, "\n"), "\n") {
+					if line != "" {
+						logf("%s", line)
+					}
+				}
+			}
+		})
+		if err != nil {
+			return classifySSHError(err)
+		}
+		if res.ExitCode != 0 {
+			stdout := strings.TrimSpace(res.Stdout)
+			if isImagePullFailure(stdout) {
+				if missing := s.missingImagesHint(ctx, inst, r); missing != "" {
+					return fmt.Errorf("docker compose up failed (exit %d): 镜像拉取失败，目标主机无法访问镜像仓库。\n缺失镜像:\n%s\n\n可在「能拉取镜像的主机」详情页使用镜像同步功能，把这些镜像从那里传输过来后重试部署。",
+						res.ExitCode, missing)
+				}
+			}
+			return fmt.Errorf("docker compose up failed (exit %d): %s", res.ExitCode, truncate(stdout, 3000))
+		}
+		if logf != nil {
+			logf("stack %s is up", inst.ProjectName)
+		}
+		return nil
+	}
+
 	if err := r.client.Upload(ctx, composePath, composeBody, "0640"); err != nil {
 		return fmt.Errorf("upload compose.yaml: %w", classifySSHError(err))
 	}

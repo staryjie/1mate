@@ -2,12 +2,15 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"1mate/internal/audit"
 	"1mate/internal/auth"
@@ -325,7 +328,121 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, caps)
 }
 
-// ---- 镜像同步 ----
+// ---- 主机终端 (WebSocket) ----
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  4 * 1024,
+	WriteBufferSize: 4 * 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		// Same-origin only for terminal WebSocket connections.
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		// Allow same-scheme+host origins.
+		reqOrigin := "http://" + r.Host
+		if r.TLS != nil {
+			reqOrigin = "https://" + r.Host
+		}
+		return origin == reqOrigin
+	},
+}
+
+// terminalMsg is the client→server message framing over the terminal WebSocket.
+type terminalMsg struct {
+	Type  string `json:"type"` // "input" | "resize"
+	Data  string `json:"data"`  // base64-encoded input bytes (for "input")
+	Rows  int    `json:"rows"`  // for "resize"
+	Cols  int    `json:"cols"`  // for "resize"
+}
+
+// terminalOutput is the server→client message framing.
+type terminalOutput struct {
+	Type  string `json:"type"` // "output" | "exit"
+	Data  string `json:"data"`  // base64-encoded output bytes (for "output")
+	Code  int    `json:"code"`  // exit code (for "exit")
+}
+
+// handleHostTerminal upgrades the connection to a WebSocket and bridges it to
+// an interactive SSH PTY session on the target host.
+func (s *Server) handleHostTerminal(w http.ResponseWriter, r *http.Request) {
+	hostID := r.PathValue("id")
+
+	// Authenticate via session cookie (browser sends cookies with WS handshake).
+	sess, err := s.auth.Authenticate(r)
+	if err != nil {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	_ = sess
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.log.Error("websocket upgrade failed", "error", err)
+		return
+	}
+	defer conn.Close()
+
+	// Create the PTY session on the remote host.
+	ptyID, err := s.svc.CreatePtySession(hostID, "xterm-256color", 24, 80)
+	if err != nil {
+		s.failFrom(w, err)
+		conn.WriteJSON(terminalOutput{Type: "exit", Code: 1})
+		_ = s.svc.PtyClose(ptyID)
+		return
+	}
+	defer s.svc.PtyClose(ptyID)
+
+	// Notify client that the terminal is ready.
+	_ = conn.WriteJSON(terminalOutput{Type: "output", Data: base64.StdEncoding.EncodeToString([]byte("\r\n[1mate terminal ready]\r\n"))})
+
+	// Forward PTY output → WebSocket.
+	outputDone := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 4*1024)
+		for {
+			n, err := s.svc.PtyRead(ptyID, buf)
+			if n > 0 {
+				_ = conn.WriteJSON(terminalOutput{
+					Type: "output",
+					Data: base64.StdEncoding.EncodeToString(buf[:n]),
+				})
+			}
+			if err != nil {
+				outputDone <- err
+				return
+			}
+		}
+	}()
+
+	// WebSocket → PTY input.
+	for {
+		var msg terminalMsg
+		if err := conn.ReadJSON(&msg); err != nil {
+			if websocket.IsUnexpectedCloseError(err,
+				websocket.CloseGoingAway, websocket.CloseAbnormalClosure,
+				websocket.CloseNormalClosure, websocket.CloseNoStatusReceived) {
+				s.log.Error("websocket read error", "error", err)
+			}
+			return
+		}
+		switch msg.Type {
+		case "input":
+			data, decodeErr := base64.StdEncoding.DecodeString(msg.Data)
+			if decodeErr != nil {
+				continue
+			}
+			if writeErr := s.svc.PtyWrite(ptyID, data); writeErr != nil {
+				s.log.Error("pty write error", "error", writeErr)
+				return
+			}
+		case "resize":
+			if msg.Rows > 0 && msg.Cols > 0 {
+				_ = s.svc.PtyResize(ptyID, msg.Rows, msg.Cols)
+			}
+		}
+	}
+}
 
 type imageSyncReq struct {
 	SourceHostID string   `json:"source_host_id"`

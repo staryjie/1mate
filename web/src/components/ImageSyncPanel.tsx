@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import {
   Alert,
   Button,
@@ -21,17 +20,26 @@ import type { ImagePrecheckResult } from '../api/types'
 // 数据经源主机 docker save → SSH → 目标主机 docker load，不在平台落盘。
 // 也支持手动输入任意镜像引用（例如给还没有实例的新主机预同步镜像）。
 export default function ImageSyncPanel({ hostId }: { hostId: string }) {
-  const navigate = useNavigate()
   const [syncOpen, setSyncOpen] = useState(false)
   const [sourceHostId, setSourceHostId] = useState<string | undefined>()
   const [manualImages, setManualImages] = useState('')
+  const [syncedImages, setSyncedImages] = useState<string[]>([])
 
   const hosts = useHosts()
-  const precheck = useImagePrecheck(hostId)
+  const precheck = useImagePrecheck(hostId, syncedImages)
   const sync = useImageSync(hostId)
 
   const results: ImagePrecheckResult[] = precheck.data?.results ?? []
   const missing = results.filter((r) => !r.present)
+
+  // 合并 syncedImages 中不在 results 中的镜像（标记为 present，因刚刚同步成功）
+  const mergedResults = useMemo(() => {
+    const existing = new Set(results.map((r) => r.image))
+    const extra = syncedImages
+      .filter((img) => !existing.has(img))
+      .map((img) => ({ image: img, present: true }))
+    return [...results, ...extra]
+  }, [results, syncedImages])
 
   const otherHosts = (hosts.data?.hosts ?? []).filter(
     (h) => h.id !== hostId && h.status === 'ok',
@@ -63,11 +71,16 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
     sync.mutate(
       { source_host_id: sourceHostId, images: syncList },
       {
-        onSuccess: (res) => {
+        onSuccess: () => {
           message.success('同步任务已启动')
           setSyncOpen(false)
           setManualImages('')
-          navigate(`/jobs/${res.job_id}`)
+          // 将同步的镜像加入待检查列表，使面板立即显示同步结果
+          setSyncedImages((prev) => {
+            const set = new Set(prev)
+            for (const img of syncList) set.add(img)
+            return Array.from(set)
+          })
         },
         onError: (e) => message.error(`启动失败: ${String(e)}`),
       },
@@ -146,10 +159,12 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
         size="small"
         rowKey="image"
         columns={columns}
-        dataSource={results}
+        dataSource={mergedResults}
         loading={precheck.isFetching}
         pagination={false}
-        locale={{ emptyText: '该主机还没有实例，或尚未探测。可在下方同步对话框中手动输入镜像引用，预先同步。' }}
+        locale={{
+          emptyText: '该主机还没有实例，或尚未探测。可在下方同步对话框中手动输入镜像引用，预先同步。',
+        }}
       />
 
       <Modal

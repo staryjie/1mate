@@ -30,6 +30,7 @@ import {
 } from '../api/hooks'
 import { ComposeKindTag, HostStatusTag, InstanceStatusTag } from '../components/StatusTags'
 import CapabilityPanel from '../components/CapabilityPanel'
+import Terminal from '../components/Terminal'
 import ImageSyncPanel from '../components/ImageSyncPanel'
 import LogViewer from '../components/LogViewer'
 import { formatDateTime } from '../utils/format'
@@ -307,6 +308,11 @@ export default function HostDetailPage() {
             key: 'images',
             label: '镜像管理',
             children: <ImageSyncPanel hostId={host.id} />,
+          },
+          {
+            key: 'terminal',
+            label: '终端',
+            children: <Terminal hostId={host.id} />,
           },
           {
             key: 'info',

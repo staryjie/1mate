@@ -9,21 +9,22 @@ import (
 
 const instanceColumns = `id, name, slug, host_id, project_name, base_dir, bind_address, tm_port,
 	grafana_port, mqtt_port, timezone, region, image_tag, postgres_tag, grafana_admin_user,
-	disable_mqtt, extra_env, tm_encryption_key, db_user, db_pass, grafana_pass, compose_major,
+	disable_mqtt, extra_env, source, tm_encryption_key, db_user, db_pass, grafana_pass, compose_major,
 	compose_sha256, status, status_message, last_job_id, created_at, updated_at`
 
 func (s *Store) scanInstance(sc interface{ Scan(...any) error }) (*model.Instance, error) {
 	var in model.Instance
 	var disableMQTT int
-	var extraEnv, created, updated string
+	var extraEnv, source, created, updated string
 	if err := sc.Scan(&in.ID, &in.Name, &in.Slug, &in.HostID, &in.ProjectName, &in.BaseDir,
 		&in.BindAddress, &in.TMPort, &in.GrafanaPort, &in.MQTTPort, &in.Timezone, &in.Region,
-		&in.ImageTag, &in.PostgresTag, &in.GrafanaAdminUser, &disableMQTT, &extraEnv,
+		&in.ImageTag, &in.PostgresTag, &in.GrafanaAdminUser, &disableMQTT, &extraEnv, &source,
 		&in.TMEncryptionKey, &in.DBUser, &in.DBPass, &in.GrafanaPass, &in.ComposeMajor,
 		&in.ComposeSHA256, &in.Status, &in.StatusMessage, &in.LastJobID, &created, &updated); err != nil {
 		return nil, mapErr(err)
 	}
 	in.DisableMQTT = disableMQTT != 0
+	in.Source = source
 	in.ExtraEnv = map[string]string{}
 	if extraEnv != "" {
 		_ = json.Unmarshal([]byte(extraEnv), &in.ExtraEnv)
@@ -40,11 +41,11 @@ func (s *Store) CreateInstance(in *model.Instance) error {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO instances(`+instanceColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		in.ID, in.Name, in.Slug, in.HostID, in.ProjectName, in.BaseDir, in.BindAddress,
 		in.TMPort, in.GrafanaPort, in.MQTTPort, in.Timezone, in.Region, in.ImageTag,
 		in.PostgresTag, in.GrafanaAdminUser, boolInt(in.DisableMQTT), string(extra),
-		in.TMEncryptionKey, in.DBUser, in.DBPass, in.GrafanaPass, in.ComposeMajor,
+		in.Source, in.TMEncryptionKey, in.DBUser, in.DBPass, in.GrafanaPass, in.ComposeMajor,
 		in.ComposeSHA256, in.Status, in.StatusMessage, in.LastJobID, ts, ts)
 	if err != nil {
 		return err
@@ -93,12 +94,12 @@ func (s *Store) UpdateInstance(in *model.Instance) error {
 	}
 	res, err := s.db.Exec(`UPDATE instances SET name=?, slug=?, base_dir=?, bind_address=?,
 		tm_port=?, grafana_port=?, mqtt_port=?, timezone=?, region=?, image_tag=?, postgres_tag=?,
-		grafana_admin_user=?, disable_mqtt=?, extra_env=?, tm_encryption_key=?, db_user=?, db_pass=?,
+		grafana_admin_user=?, disable_mqtt=?, extra_env=?, source=?, tm_encryption_key=?, db_user=?, db_pass=?,
 		grafana_pass=?, compose_major=?, compose_sha256=?, status=?, status_message=?, last_job_id=?,
 		updated_at=? WHERE id=?`,
 		in.Name, in.Slug, in.BaseDir, in.BindAddress, in.TMPort, in.GrafanaPort, in.MQTTPort,
 		in.Timezone, in.Region, in.ImageTag, in.PostgresTag, in.GrafanaAdminUser,
-		boolInt(in.DisableMQTT), string(extra), in.TMEncryptionKey, in.DBUser, in.DBPass,
+		boolInt(in.DisableMQTT), string(extra), in.Source, in.TMEncryptionKey, in.DBUser, in.DBPass,
 		in.GrafanaPass, in.ComposeMajor, in.ComposeSHA256, in.Status, in.StatusMessage,
 		in.LastJobID, now(), in.ID)
 	if err != nil {

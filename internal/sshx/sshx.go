@@ -50,6 +50,22 @@ type Client interface {
 	// RunWithStdin streams r to the stdin of cmd and discards stdout. Used for
 	// streaming image archives into `docker load` without a temp file.
 	RunWithStdin(ctx context.Context, cmd string, r io.Reader, opts RunOptions) error
+	// PtyStart starts an interactive PTY session on the remote host. The
+	// returned PtySession supports bidirectional terminal I/O.
+	PtyStart(ctx context.Context, term string, rows, cols int, opts RunOptions) (PtySession, error)
+	Close() error
+}
+
+// PtySession is an interactive terminal session over SSH.
+type PtySession interface {
+	// Read reads output from the PTY. Blocks until data is available or the
+	// session is closed.
+	Read(p []byte) (int, error)
+	// Write sends input to the PTY.
+	Write(p []byte) (int, error)
+	// Resize changes the terminal window size.
+	Resize(rows, cols int) error
+	// Close closes the PTY session and releases resources.
 	Close() error
 }
 
@@ -179,6 +195,18 @@ func (f *Fake) RunWithStdin(ctx context.Context, cmd string, r io.Reader, opts R
 	}
 	return nil
 }
+
+func (f *Fake) PtyStart(ctx context.Context, term string, rows, cols int, opts RunOptions) (PtySession, error) {
+	f.Calls = append(f.Calls, "pty "+term)
+	return &fakePty{}, nil
+}
+
+type fakePty struct{}
+
+func (f *fakePty) Read(p []byte) (int, error) { return 0, io.EOF }
+func (f *fakePty) Write(p []byte) (int, error) { return len(p), nil }
+func (f *fakePty) Resize(rows, cols int) error { return nil }
+func (f *fakePty) Close() error { return nil }
 
 func itoa(n int) string {
 	if n == 0 {

@@ -47,6 +47,9 @@ func Router(s *Server, webFS fs.FS, corsAllowed string) http.Handler {
 	api(http.MethodPost, "/api/v1/hosts/{id}/images/precheck", s.handleImagePrecheck, false)
 	api(http.MethodPost, "/api/v1/hosts/{id}/images/sync", s.handleImageSync, false)
 
+	// 主机终端 (WebSocket)。
+	mux.Handle("GET /api/v1/hosts/{id}/terminal", s.requireAuth(http.HandlerFunc(s.handleHostTerminal)))
+
 	// Instances.
 	api(http.MethodGet, "/api/v1/instances", s.handleListInstances, false)
 	api(http.MethodPost, "/api/v1/instances", s.handleCreateInstance, false)

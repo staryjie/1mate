@@ -236,13 +236,13 @@ export function useChangePassword() {
   })
 }
 
-export function useImagePrecheck(hostId: string | undefined) {
+export function useImagePrecheck(hostId: string | undefined, images?: string[]) {
   return useQuery({
-    queryKey: ['image-precheck', hostId],
+    queryKey: ['image-precheck', hostId, images?.slice().sort().join(',') ?? ''],
     queryFn: () =>
       api.post<{ results: import('./types').ImagePrecheckResult[] }>(
         `/api/v1/hosts/${hostId}/images/precheck`,
-        {},
+        { images: images ?? [] },
       ),
     enabled: Boolean(hostId),
   })

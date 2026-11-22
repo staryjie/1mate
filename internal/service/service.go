@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"1mate/internal/cryptox"
 	"1mate/internal/model"
@@ -31,14 +33,26 @@ type Service struct {
 
 	// Dial connects to a host. Replaced by tests.
 	Dial func(addr string, port int, auth sshx.Auth) sshx.Client
+
+	// ptySessions holds active interactive terminal sessions keyed by session ID.
+	ptyMu     sync.Mutex
+	ptySessions map[string]*ptySession
+	nextPtyID   int
+}
+
+type ptySession struct {
+	hostID string
+	pty    sshx.PtySession
+	client sshx.Client
 }
 
 func New(st *store.Store, box *cryptox.Box, red *redact.Redactor, dataDir string) *Service {
 	return &Service{
-		Store:   st,
-		Box:     box,
-		Red:     red,
-		DataDir: dataDir,
+		Store:       st,
+		Box:         box,
+		Red:         red,
+		DataDir:     dataDir,
+		ptySessions: make(map[string]*ptySession),
 		Dial: func(addr string, port int, auth sshx.Auth) sshx.Client {
 			return sshx.New(addr, port, auth)
 		},
@@ -151,4 +165,81 @@ func (s *Service) closeQuietly(c sshx.Client) {
 	if c != nil {
 		_ = c.Close()
 	}
+}
+
+// CreatePtySession connects to the host and starts an interactive PTY session.
+// Returns a session ID that the API layer uses to route WebSocket messages.
+func (s *Service) CreatePtySession(hostID, term string, rows, cols int) (string, error) {
+	h, err := s.Store.GetHost(hostID)
+	if err != nil {
+		return "", err
+	}
+	client, sudo, err := s.Connect(h)
+	if err != nil {
+		return "", classifySSHError(err)
+	}
+	pty, err := client.PtyStart(context.Background(), term, rows, cols, sshx.RunOptions{
+		Sudo: sudo,
+	})
+	if err != nil {
+		client.Close()
+		return "", classifySSHError(err)
+	}
+	s.ptyMu.Lock()
+	defer s.ptyMu.Unlock()
+	s.nextPtyID++
+	id := fmt.Sprintf("pty-%d", s.nextPtyID)
+	s.ptySessions[id] = &ptySession{hostID: hostID, pty: pty, client: client}
+	return id, nil
+}
+
+// PtyWrite sends input to a PTY session.
+func (s *Service) PtyWrite(sessionID string, data []byte) error {
+	s.ptyMu.Lock()
+	ps, ok := s.ptySessions[sessionID]
+	s.ptyMu.Unlock()
+	if !ok {
+		return store.ErrNotFound
+	}
+	_, err := ps.pty.Write(data)
+	return err
+}
+
+// PtyRead reads output from a PTY session. Blocks until data is available or
+// the session is closed.
+func (s *Service) PtyRead(sessionID string, buf []byte) (int, error) {
+	s.ptyMu.Lock()
+	ps, ok := s.ptySessions[sessionID]
+	s.ptyMu.Unlock()
+	if !ok {
+		return 0, store.ErrNotFound
+	}
+	return ps.pty.Read(buf)
+}
+
+// PtyResize resizes a PTY session's window.
+func (s *Service) PtyResize(sessionID string, rows, cols int) error {
+	s.ptyMu.Lock()
+	ps, ok := s.ptySessions[sessionID]
+	s.ptyMu.Unlock()
+	if !ok {
+		return store.ErrNotFound
+	}
+	return ps.pty.Resize(rows, cols)
+}
+
+// PtyClose closes a PTY session and releases its SSH connection.
+func (s *Service) PtyClose(sessionID string) error {
+	s.ptyMu.Lock()
+	ps, ok := s.ptySessions[sessionID]
+	if ok {
+		delete(s.ptySessions, sessionID)
+	}
+	s.ptyMu.Unlock()
+	if !ok {
+		return store.ErrNotFound
+	}
+	_ = ps.pty.Close()
+	_ = ps.client.Close()
+	return nil
 }

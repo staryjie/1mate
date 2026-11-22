@@ -263,6 +263,28 @@ paths:
               schema: { $ref: "#/components/schemas/JobRef" }
         "400": { description: 未确认系统变更或选项非法 }
         "403": { description: 无提权能力（E_NO_PRIVILEGE / E_SUDO_PASSWORD） }
+  /hosts/{id}/terminal:
+    get:
+      operationId: hostTerminal
+      tags: [hosts]
+      summary: WebSocket SSH 终端连接（在浏览器中连接到主机的远程 shell）
+      parameters:
+        - $ref: "#/components/parameters/HostID"
+      description: |
+        通过 WebSocket 与远程主机的 SSH PTY 会话进行双向通信。
+
+        客户端发送 JSON 格式消息：
+        - `{ "type": "input", "data": "<base64>" }` — 将解码后的数据写入 PTY stdin
+        - `{ "type": "resize", "rows": N, "cols": N }` — 调整终端尺寸
+        - `{ "type": "close" }` — 关闭终端会话
+
+        服务端返回 JSON 格式消息：
+        - `{ "type": "output", "data": "<base64>" }` — PTY stdout/stderr 数据
+        - `{ "type": "exit", "code": N }` — 会话退出，退出码为 N
+        - `{ "type": "error", "message": "..." }` — 错误信息
+      responses:
+        "101": { description: Switching Protocols (WebSocket) }
+        "403": { description: 未认证或无权访问该主机 }
   /instances:
     get:
       operationId: listInstances

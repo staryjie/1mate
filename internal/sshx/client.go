@@ -419,6 +419,115 @@ func (d *Dialer) Close() error {
 	return err
 }
 
+// ptySession is an interactive PTY session over SSH.
+type ptySession struct {
+	mu      sync.Mutex
+	session *ssh.Session
+	stdin   io.WriteCloser
+	stdout  io.Reader
+	done    chan struct{}
+	closed  bool
+}
+
+func (p *ptySession) Read(b []byte) (int, error) {
+	return p.stdout.Read(b)
+}
+
+func (p *ptySession) Write(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return 0, errors.New("pty session closed")
+	}
+	return p.stdin.Write(b)
+}
+
+func (p *ptySession) Resize(rows, cols int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return errors.New("pty session closed")
+	}
+	return p.session.WindowChange(rows, cols)
+}
+
+func (p *ptySession) Close() error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	p.mu.Unlock()
+	_ = p.stdin.Close()
+	_ = p.session.Close()
+	<-p.done
+	return nil
+}
+
+// PtyStart starts an interactive PTY session on the remote host. It requests
+// a PTY with the given term type and window size, starts a shell, and returns
+// a PtySession for bidirectional terminal I/O.
+func (d *Dialer) PtyStart(ctx context.Context, term string, rows, cols int, opts RunOptions) (PtySession, error) {
+	if err := d.connect(ctx); err != nil {
+		return nil, err
+	}
+	session, err := d.client.NewSession()
+	if err != nil {
+		d.reset()
+		return nil, fmt.Errorf("ssh session: %w", err)
+	}
+
+	// Request a PTY with the given terminal size.
+	if err := session.RequestPty(term, rows, cols, ssh.TerminalModes{}); err != nil {
+		session.Close()
+		return nil, fmt.Errorf("request pty: %w", err)
+	}
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		session.Close()
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		session.Close()
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+
+	// Start a login shell. The command runs through the remote login shell.
+	shell := "sh"
+	if opts.Prefix != "" {
+		shell = opts.Prefix
+	}
+	if opts.Sudo.Prefix() != "" {
+		shell = opts.Sudo.Prefix() + shell
+	}
+	if opts.Sudo.NeedsPassword() {
+		shell = "sudo -S -p '' " + shell
+	}
+
+	if err := session.Start(shell); err != nil {
+		session.Close()
+		return nil, fmt.Errorf("start shell: %w", err)
+	}
+
+	ps := &ptySession{
+		session: session,
+		stdin:   stdin,
+		stdout:  stdout,
+		done:    make(chan struct{}),
+	}
+
+	// Wait for the session to end and signal done.
+	go func() {
+		_ = session.Wait()
+		close(ps.done)
+	}()
+
+	return ps, nil
+}
+
 // BuildCommand joins the caller prefix, the sudo prefix and the command. When
 // sudo needs a password the command is prefixed with `sudo -S -p ''` so sudo
 // reads the password from stdin (supplied by Dialer.run). The command runs

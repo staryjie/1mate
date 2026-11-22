@@ -168,6 +168,11 @@ const (
 	InstUnknown     InstanceStatus = "unknown"
 )
 
+const (
+	InstanceSourceCreated    = "created"
+	InstanceSourceImported   = "imported"
+)
+
 type Instance struct {
 	ID               string         `json:"id"`
 	Name             string         `json:"name"`
@@ -186,6 +191,7 @@ type Instance struct {
 	GrafanaAdminUser string         `json:"grafana_admin_user"`
 	DisableMQTT      bool           `json:"disable_mqtt"`
 	ExtraEnv         map[string]string `json:"extra_env"`
+	Source           string         `json:"source"` // "created" or "imported"
 	TMEncryptionKey  string         `json:"-"`
 	DBName           string         `json:"db_name"`
 	DBUser           string         `json:"db_user"`
