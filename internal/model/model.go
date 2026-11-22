@@ -214,6 +214,7 @@ const (
 	JobRestore      JobKind = "restore"
 	JobDestroy      JobKind = "destroy"
 	JobReconcile    JobKind = "reconcile"
+	JobImageSync    JobKind = "image_sync"
 )
 
 type JobStatus string
@@ -286,6 +287,6 @@ func SupportedComposeMajor(major int) bool { return major == 1 || major == 2 }
 func AllJobKinds() []JobKind {
 	return []JobKind{
 		JobHostProbe, JobInstallDocker, JobDeploy, JobStart, JobStop, JobRestart,
-		JobUpgrade, JobBackup, JobRestore, JobDestroy, JobReconcile,
+		JobUpgrade, JobBackup, JobRestore, JobDestroy, JobReconcile, JobImageSync,
 	}
 }

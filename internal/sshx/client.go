@@ -332,6 +332,82 @@ func (d *Dialer) UploadReader(ctx context.Context, path string, r io.Reader, mod
 	return nil
 }
 
+// RunWithStdin streams r into the stdin of the remote command and discards
+// stdout. When sudo needs a password the password line is written first,
+// followed by the stream content.
+func (d *Dialer) RunWithStdin(ctx context.Context, cmd string, r io.Reader, opts RunOptions) error {
+	if err := d.connect(ctx); err != nil {
+		return err
+	}
+	session, err := d.client.NewSession()
+	if err != nil {
+		d.reset()
+		return err
+	}
+	defer session.Close()
+
+	var stderr bytes.Buffer
+	session.Stdout = &stderr
+	session.Stderr = &stderr
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		return err
+	}
+
+	full := BuildCommand(cmd, opts)
+	if err := session.Start(full); err != nil {
+		return err
+	}
+
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 2 * time.Hour
+	}
+
+	type result struct {
+		err error
+	}
+	copyDone := make(chan result, 1)
+	go func() {
+		// Sudo password goes first; the stream follows.
+		if opts.Sudo.NeedsPassword() {
+			if _, werr := io.WriteString(stdin, opts.Sudo.Password+"\n"); werr != nil {
+				copyDone <- result{werr}
+				return
+			}
+		}
+		if _, cerr := io.Copy(stdin, r); cerr != nil {
+			copyDone <- result{cerr}
+			return
+		}
+		copyDone <- result{stdin.Close()}
+	}()
+
+	started := time.Now()
+	select {
+	case <-ctx.Done():
+		_ = session.Signal(ssh.SIGKILL)
+		session.Close()
+		return ctx.Err()
+	case res := <-copyDone:
+		if res.err != nil {
+			_ = session.Signal(ssh.SIGKILL)
+			session.Close()
+			return res.err
+		}
+	case <-time.After(timeout):
+		_ = session.Signal(ssh.SIGKILL)
+		session.Close()
+		return fmt.Errorf("stream timed out after %s", timeout)
+	}
+	_ = started
+
+	if err := session.Wait(); err != nil {
+		return fmt.Errorf("remote command failed: %v: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
 func (d *Dialer) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -126,8 +126,16 @@ func (s *Service) deploy(ctx context.Context, inst *model.Instance, logf func(st
 		return classifySSHError(err)
 	}
 	if res.ExitCode != 0 {
-		s.restorePrevious(ctx, r, prevCompose, prevEnv, composePath, envPath)
-		return fmt.Errorf("docker compose up failed (exit %d): %s", res.ExitCode, truncate(strings.TrimSpace(res.Stdout), 3000))
+		// 拉取镜像失败时给出可操作的提示：列出缺失镜像，并提示可从
+		// 其他主机同步（见主机详情页的镜像管理）。
+		stdout := strings.TrimSpace(res.Stdout)
+		if isImagePullFailure(stdout) {
+			if missing := s.missingImagesHint(ctx, inst, r); missing != "" {
+				return fmt.Errorf("docker compose up failed (exit %d): 镜像拉取失败，目标主机无法访问镜像仓库。\n缺失镜像:\n%s\n\n可在「能拉取镜像的主机」详情页使用镜像同步功能，把这些镜像从那里传输过来后重试部署。",
+					res.ExitCode, missing)
+			}
+		}
+		return fmt.Errorf("docker compose up failed (exit %d): %s", res.ExitCode, truncate(stdout, 3000))
 	}
 
 	// Reload from store to preserve ciphertext secrets (inst has plaintext
@@ -147,8 +155,55 @@ func (s *Service) deploy(ctx context.Context, inst *model.Instance, logf func(st
 	return nil
 }
 
-func (s *Service) restorePrevious(ctx context.Context, r *composeRunner, prevCompose, prevEnv, composePath, envPath string) {
-	if prevCompose == "" {
+// isImagePullFailure 判断 compose up 的输出是否属于镜像拉取失败（网络不可达、
+// 拉取超时等），用于给出比原始报错更友好的提示。
+func isImagePullFailure(stdout string) bool {
+	low := strings.ToLower(stdout)
+	for _, kw := range []string{
+		"pull access denied", "failed to resolve", "error getting credentials",
+		"timeout", "eof", "connection refused", "i/o timeout", "no route to host",
+		"failed to register layer", "context deadline exceeded", "tls handshake",
+		"proxy", "manifest unknown",
+	} {
+		if strings.Contains(low, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// missingImagesHint 返回目标主机缺失的镜像清单（换行分隔），失败时返回空串。
+func (s *Service) missingImagesHint(ctx context.Context, inst *model.Instance, r *composeRunner) string {
+	images := TeslaMateImages(inst)
+	if len(images) == 0 {
+		return ""
+	}
+	args := strings.Join(images, " ")
+	res, err := r.client.Run(ctx, r.prefix+"docker image inspect --format '{{.RepoTags}}' "+args,
+		sshx.RunOptions{Timeout: 1 * time.Minute, Sudo: r.sudo})
+	if err != nil || res.ExitCode != 0 {
+		return strings.Join(images, "\n")
+	}
+	var missing []string
+	present := map[string]bool{}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && line != "[]" {
+			present[line] = true
+		}
+	}
+	for _, img := range images {
+		if !present[img] {
+			missing = append(missing, img)
+		}
+	}
+	if len(missing) == 0 {
+		missing = images
+	}
+	return strings.Join(missing, "\n")
+}
+
+func (s *Service) restorePrevious(ctx context.Context, r *composeRunner, prevCompose, prevEnv, composePath, envPath string) {	if prevCompose == "" {
 		return
 	}
 	cctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

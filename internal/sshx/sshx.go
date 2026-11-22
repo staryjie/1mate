@@ -47,6 +47,9 @@ type Client interface {
 	// DownloadWithCommand streams the stdout of cmd to w, failing on a non-zero
 	// exit. It is used for pg_dump over SSH.
 	DownloadWithCommand(ctx context.Context, cmd string, opts RunOptions, w io.Writer) (int64, error)
+	// RunWithStdin streams r to the stdin of cmd and discards stdout. Used for
+	// streaming image archives into `docker load` without a temp file.
+	RunWithStdin(ctx context.Context, cmd string, r io.Reader, opts RunOptions) error
 	Close() error
 }
 
@@ -160,6 +163,21 @@ func (f *Fake) DownloadWithCommand(ctx context.Context, cmd string, opts RunOpti
 		return int64(n), werr
 	}
 	return 0, nil
+}
+
+func (f *Fake) RunWithStdin(ctx context.Context, cmd string, r io.Reader, opts RunOptions) error {
+	f.Calls = append(f.Calls, "stdin "+cmd)
+	_, _ = io.Copy(io.Discard, r)
+	if f.Handler != nil {
+		res, err := f.Handler(cmd)
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return errors.New("fake: command failed with exit " + itoa(res.ExitCode))
+		}
+	}
+	return nil
 }
 
 func itoa(n int) string {

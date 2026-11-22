@@ -38,6 +38,7 @@ export type JobKind =
   | 'restore'
   | 'destroy'
   | 'reconcile'
+  | 'image_sync'
 
 export interface Capabilities {
   host_id: string
@@ -211,4 +212,9 @@ export interface ImportInstanceInput {
   grafana_port?: number
   mqtt_port?: number
   region?: string
+}
+
+export interface ImagePrecheckResult {
+  image: string
+  present: boolean
 }

@@ -43,6 +43,10 @@ func Router(s *Server, webFS fs.FS, corsAllowed string) http.Handler {
 	api(http.MethodGet, "/api/v1/hosts/{id}/install-script", s.handleInstallScript, false)
 	api(http.MethodPost, "/api/v1/hosts/{id}/actions/install-docker", s.handleInstall, false)
 
+	// 镜像预检与主机间同步。
+	api(http.MethodPost, "/api/v1/hosts/{id}/images/precheck", s.handleImagePrecheck, false)
+	api(http.MethodPost, "/api/v1/hosts/{id}/images/sync", s.handleImageSync, false)
+
 	// Instances.
 	api(http.MethodGet, "/api/v1/instances", s.handleListInstances, false)
 	api(http.MethodPost, "/api/v1/instances", s.handleCreateInstance, false)

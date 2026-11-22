@@ -30,6 +30,7 @@ import {
 } from '../api/hooks'
 import { ComposeKindTag, HostStatusTag, InstanceStatusTag } from '../components/StatusTags'
 import CapabilityPanel from '../components/CapabilityPanel'
+import ImageSyncPanel from '../components/ImageSyncPanel'
 import LogViewer from '../components/LogViewer'
 import { formatDateTime } from '../utils/format'
 
@@ -301,6 +302,11 @@ export default function HostDetailPage() {
                 )}
               </Space>
             ),
+          },
+          {
+            key: 'images',
+            label: '镜像管理',
+            children: <ImageSyncPanel hostId={host.id} />,
           },
           {
             key: 'info',

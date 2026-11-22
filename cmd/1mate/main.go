@@ -195,6 +195,9 @@ func registerHandlers(jobs *job.Manager, svc *service.Service, log *slog.Logger)
 		}
 		return svc.RunRestoreJob(ctx, p, sink.Printf)
 	})
+	jobs.Register(model.JobImageSync, func(ctx context.Context, j *model.Job, sink *job.LogSink) error {
+		return svc.RunImageSyncJob(ctx, j.Payload, sink.Printf)
+	})
 	log.Debug("job handlers registered", "kinds", len(model.AllJobKinds()))
 }
 

@@ -235,3 +235,24 @@ export function useChangePassword() {
     },
   })
 }
+
+export function useImagePrecheck(hostId: string | undefined) {
+  return useQuery({
+    queryKey: ['image-precheck', hostId],
+    queryFn: () =>
+      api.post<{ results: import('./types').ImagePrecheckResult[] }>(
+        `/api/v1/hosts/${hostId}/images/precheck`,
+        {},
+      ),
+    enabled: Boolean(hostId),
+  })
+}
+
+export function useImageSync(targetHostId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: { source_host_id: string; images: string[] }) =>
+      api.post<{ job_id: string }>(`/api/v1/hosts/${targetHostId}/images/sync`, payload),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['image-precheck', targetHostId] }),
+  })
+}

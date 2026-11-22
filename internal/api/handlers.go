@@ -325,6 +325,64 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, caps)
 }
 
+// ---- 镜像同步 ----
+
+type imageSyncReq struct {
+	SourceHostID string   `json:"source_host_id"`
+	Images       []string `json:"images"`
+}
+
+// handleImagePrecheck 检查主机缺失哪些镜像（只读）。
+func (s *Server) handleImagePrecheck(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req struct {
+		Images []string `json:"images"`
+	}
+	// body 可选：不带 body 时检查主机上所有实例需要的镜像。
+	_ = s.decode(w, r, &req)
+	results, err := s.svc.ImagePrecheck(id, req.Images)
+	if err != nil {
+		s.failFrom(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// handleImageSync 发起主机间镜像同步任务。
+func (s *Server) handleImageSync(w http.ResponseWriter, r *http.Request) {
+	targetID := r.PathValue("id")
+	var req imageSyncReq
+	if !s.decode(w, r, &req) {
+		return
+	}
+	if req.SourceHostID == "" {
+		s.fail(w, http.StatusBadRequest, CodeValidation, "source_host_id is required")
+		return
+	}
+	if req.SourceHostID == targetID {
+		s.fail(w, http.StatusBadRequest, CodeValidation, "source and target host must differ")
+		return
+	}
+	if len(req.Images) == 0 {
+		s.fail(w, http.StatusBadRequest, CodeValidation, "images is required")
+		return
+	}
+	payload := service.MarshalPayload(service.ImageSyncPayload{
+		SourceHostID: req.SourceHostID,
+		TargetHostID: targetID,
+		Images:       req.Images,
+	})
+	j, err := s.jobs.Submit(model.JobImageSync, targetID, "", payload, s.actor(r))
+	if err != nil {
+		s.mapJobErr(w, err)
+		return
+	}
+	s.audit.Log(s.actor(r), "image.sync", "host", targetID, map[string]any{
+		"job_id": j.ID, "source_host_id": req.SourceHostID, "images": len(req.Images),
+	}, r)
+	writeJSON(w, http.StatusAccepted, map[string]any{"job_id": j.ID})
+}
+
 // ---- provisioning ----
 
 type installReq struct {
