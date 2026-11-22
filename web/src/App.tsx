@@ -105,7 +105,8 @@ export default function App() {
     return <Navigate to="/login" state={{ from: location.pathname }} replace />
   }
   if (authed && location.pathname === '/login') {
-    return <Navigate to="/" replace />
+    const from = (location.state as { from?: string } | null)?.from
+    return <Navigate to={from && from.startsWith('/') && from !== '/login' ? from : '/'} replace />
   }
 
   return (

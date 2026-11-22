@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Alert, Button, Card, Form, Input, Typography, App } from 'antd'
 import { LockOutlined, UserOutlined } from '@ant-design/icons'
 import { api, setCSRFToken } from '../api/client'
@@ -9,7 +9,13 @@ export default function LoginPage({ onDone }: { onDone: () => Promise<void> }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const navigate = useNavigate()
+  const location = useLocation()
   const { message } = App.useApp()
+
+  // 会话失效被重定向到登录页时，App 会把原路径放在 location.state.from，
+  // 登录成功后应回到原页面而不是总览。
+  const from = (location.state as { from?: string } | null)?.from
+  const target = from && from.startsWith('/') && from !== '/login' ? from : '/'
 
   const submit = async (values: { username: string; password: string }) => {
     setLoading(true)
@@ -19,7 +25,7 @@ export default function LoginPage({ onDone }: { onDone: () => Promise<void> }) {
       setCSRFToken(res.csrf_token)
       await onDone()
       message.success(`欢迎回来，${res.user.username}`)
-      navigate('/', { replace: true })
+      navigate(target, { replace: true })
     } catch (err) {
       setError((err as Error).message)
     } finally {
