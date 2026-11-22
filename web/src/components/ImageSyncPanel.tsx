@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   Button,
   Card,
+  Input,
   Modal,
   Select,
   Space,
@@ -17,9 +18,11 @@ import type { ImagePrecheckResult } from '../api/types'
 
 // 镜像同步面板：检查本机缺失镜像，并从其他主机流式同步过来。
 // 数据经源主机 docker save → SSH → 目标主机 docker load，不在平台落盘。
+// 也支持手动输入任意镜像引用（例如给还没有实例的新主机预同步镜像）。
 export default function ImageSyncPanel({ hostId }: { hostId: string }) {
   const [syncOpen, setSyncOpen] = useState(false)
   const [sourceHostId, setSourceHostId] = useState<string | undefined>()
+  const [manualImages, setManualImages] = useState('')
 
   const hosts = useHosts()
   const precheck = useImagePrecheck(hostId)
@@ -32,14 +35,36 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
     (h) => h.id !== hostId && h.status === 'ok',
   )
 
+  // 手动输入的镜像引用：按行/空格切分，去重、去空。
+  const manualList = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          manualImages
+            .split(/[\s,;]+/)
+            .map((s) => s.trim())
+            .filter(Boolean),
+        ),
+      ),
+    [manualImages],
+  )
+
+  // 同步清单 = 预检缺失的镜像 + 手动输入的镜像（去重）。
+  const syncList = useMemo(() => {
+    const set = new Set(missing.map((m) => m.image))
+    for (const img of manualList) set.add(img)
+    return Array.from(set)
+  }, [missing, manualList])
+
   const startSync = () => {
-    if (!sourceHostId || missing.length === 0) return
+    if (!sourceHostId || syncList.length === 0) return
     sync.mutate(
-      { source_host_id: sourceHostId, images: missing.map((m) => m.image) },
+      { source_host_id: sourceHostId, images: syncList },
       {
         onSuccess: (res) => {
           message.success('同步任务已启动')
           setSyncOpen(false)
+          setManualImages('')
           window.location.href = `/jobs/${res.job_id}`
         },
         onError: (e) => message.error(`启动失败: ${String(e)}`),
@@ -81,10 +106,10 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
             size="small"
             type="primary"
             icon={<SwapOutlined />}
-            disabled={missing.length === 0 || otherHosts.length === 0}
+            disabled={otherHosts.length === 0}
             onClick={() => setSyncOpen(true)}
           >
-            从其他主机同步缺失镜像
+            从其他主机同步镜像
           </Button>
         </Space>
       }
@@ -122,7 +147,7 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
         dataSource={results}
         loading={precheck.isFetching}
         pagination={false}
-        locale={{ emptyText: '该主机还没有实例，或尚未探测。' }}
+        locale={{ emptyText: '该主机还没有实例，或尚未探测。可在下方同步对话框中手动输入镜像引用，预先同步。' }}
       />
 
       <Modal
@@ -131,18 +156,37 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
         onCancel={() => setSyncOpen(false)}
         onOk={startSync}
         okText="开始同步"
-        okButtonProps={{ loading: sync.isPending }}
+        okButtonProps={{ loading: sync.isPending, disabled: syncList.length === 0 || !sourceHostId }}
       >
         <Typography.Paragraph type="secondary">
-          将以下 {missing.length} 个镜像从源主机流式同步到本机（源 docker save → 本机 docker
-          load）。镜像较大的情况下可能持续数分钟，可在任务页查看实时日志。
+          镜像从源主机流式同步到本机（源 docker save → 本机 docker load）。镜像较大时可能持续数分钟，可在任务页查看实时日志。
         </Typography.Paragraph>
-        <Space direction="vertical" style={{ width: '100%' }}>
-          {missing.map((m) => (
-            <Tag key={m.image} className="mono">
-              {m.image}
-            </Tag>
-          ))}
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          {missing.length > 0 && (
+            <div>
+              <Typography.Paragraph style={{ marginBottom: 4 }}>
+                预检缺失的镜像（自动带入）：
+              </Typography.Paragraph>
+              <Space wrap>
+                {missing.map((m) => (
+                  <Tag key={m.image} className="mono">
+                    {m.image}
+                  </Tag>
+                ))}
+              </Space>
+            </div>
+          )}
+          <div>
+            <Typography.Paragraph style={{ marginBottom: 4 }}>
+              手动添加镜像（每行一个，可选。例如给新主机预先同步 teslamate/teslamate:latest）：
+            </Typography.Paragraph>
+            <Input.TextArea
+              rows={3}
+              value={manualImages}
+              onChange={(e) => setManualImages(e.target.value)}
+              placeholder={'teslamate/teslamate:latest\npostgres:18-trixie\nteslamate/grafana:latest'}
+            />
+          </div>
           <Select
             style={{ width: '100%' }}
             placeholder="选择源主机（能拉取镜像的一台）"
@@ -150,6 +194,20 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
             onChange={setSourceHostId}
             options={otherHosts.map((h) => ({ value: h.id, label: `${h.name} (${h.address})` }))}
           />
+          {syncList.length > 0 && (
+            <div>
+              <Typography.Paragraph style={{ marginBottom: 4 }}>
+                共 {syncList.length} 个镜像将同步：
+              </Typography.Paragraph>
+              <Space wrap>
+                {syncList.map((img) => (
+                  <Tag key={img} className="mono" color="blue">
+                    {img}
+                  </Tag>
+                ))}
+              </Space>
+            </div>
+          )}
         </Space>
       </Modal>
     </Card>
