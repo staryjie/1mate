@@ -17,15 +17,20 @@
                   │  SQLite WAL  │  /var/lib/1mate/1mate.db
                   │  master.key  │  /var/lib/1mate/master.key
                   │  备份文件     │  /var/lib/1mate/backups/
-                  └──────┬───────┘
-                         │ SSH (22)
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-     Linux 主机 A    Linux 主机 B    Linux 主机 C
-     (Docker+Compose, TeslaMate 实例栈)
+                  └──┬────────┬──┘
+                     │        │ WebSocket（Agent 主动外连）
+                     │ SSH    │
+     ┌───────────────┼──┐     └──▶ ┌──────────────────┐
+     ▼               ▼  ▼          │ 内网主机（无公网）  │
+Linux 主机 A    Linux 主机 B        │ 1mate-agent 客户端 │
+(SSH 直连)      (SSH 直连)          │ Docker+Compose     │
+                                   └──────────────────┘
 ```
 
-平台自身为**无状态控制面**（数据都在自己的数据目录），通过 SSH 以无代理（agentless）方式管理目标主机；目标主机上只要求 Docker + Compose，不安装任何 1mate 组件。
+平台自身为**无状态控制面**（数据都在自己的数据目录），支持两种主机接入方式：
+
+- **SSH 模式（默认）**：平台直连目标主机 SSH，目标主机只需 Docker + Compose，不安装任何 1mate 组件。
+- **Agent 模式**：目标主机运行轻量 `1mate-agent` 客户端主动外连平台（WebSocket），适用于无公网 IP / NAT 后的内网主机；详见第 12 节与 `docs/agent-mode.md`。
 
 ---
 
@@ -35,9 +40,10 @@
 
 | 构建/运行 | 要求 |
 |---|---|
-| 构建机 | Go ≥ 1.24、Node.js ≥ 22（或使用 Docker 构建，无需本地工具链） |
-| 运行机 | Linux amd64/arm64，无需 Go/Node，只需一个二进制 + 数据目录 |
-| 目标主机 | Linux amd64/arm64，SSH 可达；armv7 不支持（TeslaMate 官方镜像已放弃） |
+| 构建机 | Go ≥ 1.26、Node.js ≥ 22（或使用 Docker 构建，无需本地工具链） |
+| 平台运行机 | Linux amd64/arm64，无需 Go/Node，只需一个二进制 + 数据目录 |
+| 目标主机（SSH 模式） | Linux amd64/arm64，SSH 可达；armv7 不支持（TeslaMate 官方镜像已放弃） |
+| 目标主机（Agent 模式） | Linux amd64/arm64，能访问平台的 HTTP(S) 端口，运行 1mate-agent；无需 SSH / 公网 IP |
 
 ### 2.2 本地构建
 
@@ -71,6 +77,20 @@ docker build -f deploy/Dockerfile -t 1mate:v1.0.0 \
   --build-arg VERSION=v1.0.0 --build-arg COMMIT=$(git rev-parse --short HEAD) .
 # 多阶段：node:22 构建前端 → golang 静态编译 → distroless 运行镜像
 ```
+
+### 2.5 构建 Agent 客户端（Agent 模式需要）
+
+Agent 是**独立的 Go module**（`agent/go.mod`），与平台二进制分开构建：
+
+```sh
+cd agent
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+  -trimpath -ldflags "-s -w" -o 1mate-agent-linux .
+# arm64：GOARCH=arm64
+```
+
+> 发布包中已提供 `1mate-agent-vX.Y.Z-linux-{amd64,arm64}.tar.gz`，生产环境建议直接下载发布包，无需自行构建。
+> Windows PowerShell 下交叉编译请用 `cmd /c "set CGO_ENABLED=0&&set GOOS=linux&&..."` 写法。
 
 ---
 
@@ -324,3 +344,95 @@ cp /var/lib/1mate/master.key /backup/master.key.bak   # 与库分开存放
 | 探测报 `unsupported` | 目标发行版超出支持列表 | 见 `docs/runbook.md` 主机排错表 |
 
 更多运行期故障排查见 `docs/runbook.md`。
+
+---
+
+## 12. Agent 客户端部署（Agent 模式主机）
+
+Agent 模式适用于**没有公网 IP、位于 NAT/防火墙后**的内网主机：由主机上的 `1mate-agent` 客户端主动外连平台，平台再通过该连接下发运维命令。平台侧无需任何额外组件（v1.1.0+ 已内建 AgentHub 与 `/api/v1/agent/connect` 端点）。
+
+> 完整接入与排错指南见 `docs/agent-mode.md`。本节给出生产部署的最小步骤。
+
+### 12.1 平台侧：创建 Agent 主机
+
+1. 在 Web 控制台「主机」页点击「添加主机」，连接方式选 **Agent（内网主机主动连接）**。
+2. 填写名称；Agent ID 与接入令牌可留空（自动生成）。
+3. 保存后平台会**一次性明文展示接入令牌**——请立即复制保存（之后不再显示完整令牌）。
+4. 也可在主机详情页「连接信息」Tab 查看 Agent ID 与令牌配置状态；通过 API `GET /api/v1/hosts/{id}/agent-install-command` 获取一键安装命令。
+
+### 12.2 目标主机侧：安装 Agent
+
+**方式 A：一键安装命令（推荐）**
+
+复制平台生成的安装命令在内网主机执行，它会写入 `/etc/1mate-agent/agent.env`（0600）与 systemd 单元：
+
+```sh
+# 命令由平台生成，形如（server_base_url 填平台地址）：
+curl -fsSL http://<平台地址>:8080/...   # 详见主机详情页安装命令
+# 然后放置二进制：
+sudo cp 1mate-agent-linux /usr/local/bin/1mate-agent
+sudo chmod 0755 /usr/local/bin/1mate-agent
+sudo systemctl daemon-reload
+sudo systemctl enable --now 1mate-agent
+```
+
+**方式 B：手动配置**
+
+1. 从 GitHub Releases 下载 `1mate-agent-vX.Y.Z-linux-{amd64,arm64}.tar.gz`，解压后：
+
+```sh
+sudo cp 1mate-agent /usr/local/bin/1mate-agent
+sudo chmod 0755 /usr/local/bin/1mate-agent
+```
+
+2. 写配置文件（平台 HTTPS 用 `wss://`，HTTP 用 `ws://`）：
+
+```sh
+sudo install -d -m 0755 /etc/1mate-agent /var/lib/1mate-agent
+sudo tee /etc/1mate-agent/agent.env >/dev/null <<'EOF'
+AGENT_SERVER_URL=wss://<平台域名>/api/v1/agent/connect
+AGENT_TOKEN=<平台生成的一次性令牌>
+AGENT_INTERVAL=30
+AGENT_RETRY_BASE=5
+AGENT_RETRY_MAX=120
+EOF
+sudo chown root:root /etc/1mate-agent/agent.env
+sudo chmod 0600 /etc/1mate-agent/agent.env
+```
+
+3. 安装 systemd 单元并启动（模板见 `deploy/agent.service`）：
+
+```sh
+sudo cp deploy/agent.service /etc/systemd/system/1mate-agent.service
+sudo id -u 1mate >/dev/null 2>&1 || sudo useradd -r -s /usr/sbin/nologin -d /var/lib/1mate-agent 1mate
+sudo chown -R 1mate:1mate /var/lib/1mate-agent
+sudo systemctl daemon-reload
+sudo systemctl enable --now 1mate-agent
+```
+
+### 12.3 Agent 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `AGENT_SERVER_URL` | `ws://127.0.0.1:8080/api/v1/agent/connect` | 平台 WS 端点，HTTP→`ws://`，HTTPS→`wss://` |
+| `AGENT_TOKEN` | 必填 | 平台生成的一次性接入令牌（机器认证） |
+| `AGENT_HOST_ID` | 空 | 可选，仅用于日志显示，不参与认证/路由 |
+| `AGENT_INTERVAL` | `30` | 心跳间隔（秒） |
+| `AGENT_RETRY_BASE` | `5` | 断线重连基础延迟（秒，指数退避） |
+| `AGENT_RETRY_MAX` | `120` | 最大重连延迟（秒） |
+
+### 12.4 验证
+
+```sh
+sudo journalctl -u 1mate-agent -f
+# 正常：connected to wss://...；断线会自动重连（retrying in Ns）
+```
+
+回到平台主机列表点击「探测」，若返回发行版 / Docker / Compose 信息即接入成功。
+
+### 12.5 Agent 模式注意事项
+
+- Agent 以 `1mate` 用户运行；安装 Docker 等特权操作需为目标用户配置相应 sudo 权限（与 SSH 模式一致）。
+- Agent 模式下 Web 交互终端（PTY）暂不可用，需要交互式操作请用 SSH 模式。
+- 大文件（如 Docker 镜像）走 base64 编码传输，超大镜像建议目标主机本地拉取。
+- `agent_token` 等同主机凭据，请离线保存、勿提交代码仓库；泄露时在平台编辑主机轮换令牌并同步更新 `agent.env`。

@@ -285,6 +285,90 @@ paths:
       responses:
         "101": { description: Switching Protocols (WebSocket) }
         "403": { description: 未认证或无权访问该主机 }
+  /hosts/{id}/images/precheck:
+    post:
+      operationId: imagePrecheck
+      tags: [hosts]
+      summary: 检查主机缺失哪些 TeslaMate 镜像（只读）
+      parameters:
+        - $ref: "#/components/parameters/HostID"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                images:
+                  type: array
+                  items: { type: string }
+                  description: 可选；不传则从该主机的实例推导所需镜像
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        image: { type: string }
+                        present: { type: boolean }
+  /hosts/{id}/images/sync:
+    post:
+      operationId: imageSync
+      tags: [hosts]
+      summary: 从源主机流式同步镜像到目标主机（docker save | docker load）
+      parameters:
+        - $ref: "#/components/parameters/HostID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_host_id, images]
+              properties:
+                source_host_id: { type: string }
+                images:
+                  type: array
+                  items: { type: string }
+      responses:
+        "202": { description: 已排队镜像同步任务 }
+  /hosts/{id}/agent-install-command:
+    get:
+      operationId: agentInstallCommand
+      tags: [hosts]
+      summary: 生成 Agent 主机的一键安装脚本（Agent 模式）
+      parameters:
+        - $ref: "#/components/parameters/HostID"
+        - { name: server_base_url, in: query, schema: { type: string, format: uri }, description: 平台 HTTP 地址，缺省从请求推导 }
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  script: { type: string }
+                  server_base_url: { type: string }
+        "400": { description: 主机不是 Agent 模式或未配置令牌 }
+  /agent/connect:
+    get:
+      operationId: agentConnect
+      tags: [agent]
+      summary: Agent 客户端 WebSocket 长连接端点（机器认证）
+      description: |
+        Agent 是独立进程，无浏览器会话。用 `agent_token` 查询参数做机器认证，
+        服务端通过 token 反查对应主机。HTTP 用 `ws://`，HTTPS 用 `wss://`。
+      parameters:
+        - { name: agent_token, in: query, required: true, schema: { type: string }, description: 平台生成的一次性接入令牌 }
+      responses:
+        "101": { description: Switching Protocols (WebSocket) }
+        "400": { description: 缺少 agent_token }
+        "401": { description: 令牌无效 }
   /instances:
     get:
       operationId: listInstances
@@ -530,6 +614,20 @@ paths:
       responses:
         "202": { description: 已请求取消 }
         "409": { description: 任务不在运行 }
+  /jobs/{id}/retry:
+    post:
+      operationId: retryJob
+      tags: [jobs]
+      summary: 重试失败/中断的任务（用原参数重新提交）
+      description: 创建并返回新任务；仅终态任务可重试，运行中的任务返回 409。
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobRef" }
+        "409": { description: 任务仍在运行 }
   /settings:
     get:
       operationId: getSettings
@@ -579,10 +677,13 @@ components:
         status_message: { type: string }
         last_probe_at: { type: string, format: date-time, nullable: true }
         instance_count: { type: integer }
+        connection_type: { type: string, enum: [ssh, agent], default: ssh }
+        agent_id: { type: string }
+        agent_token_set: { type: boolean, description: Agent 令牌是否已配置（不返回令牌明文） }
         capabilities: { $ref: "#/components/schemas/Capabilities" }
     HostInput:
       type: object
-      required: [name, address, ssh_user, auth_type]
+      required: [name]
       properties:
         name: { type: string, maxLength: 64 }
         address: { type: string }
@@ -595,6 +696,9 @@ components:
         sudo_mode: { type: string, enum: [none, root, nopasswd, password] }
         sudo_password: { type: string, format: password }
         trust_fingerprint: { type: boolean, default: false }
+        connection_type: { type: string, enum: [ssh, agent], default: ssh, description: Agent 模式跳过 SSH 凭据校验 }
+        agent_id: { type: string, description: Agent 标识，留空自动生成 }
+        agent_token: { type: string, format: password, description: Agent 接入令牌，留空自动生成；仅在创建/轮换时明文返回一次 }
     Capabilities:
       type: object
       properties:
