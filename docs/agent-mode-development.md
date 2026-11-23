@@ -369,15 +369,21 @@
 
 | 阶段 | 状态 | 开始日期 | 完成日期 | 备注 |
 |------|------|----------|----------|------|
-| Phase 0 | 计划中 | | | |
-| Phase 1 | 计划中 | | | |
-| Phase 2 | 计划中 | | | |
-| Phase 3 | 计划中 | | | |
-| Phase 4 | 计划中 | | | |
-| Phase 5 | 计划中 | | | |
-| Phase 6 | 计划中 | | | |
+| Phase 0 | ✅ 完成 | 2025-11-23 | 2025-11-23 | ConnectionType 字段 + 迁移 + store；commit 2ffbd21 |
+| Phase 1 | ✅ 完成 | 2025-11-23 | 2025-11-23 | AgentHub + WS 端点 + 认证 + 4 测试；commit d68b0a7 |
+| Phase 2 | ✅ 完成 | 2025-11-23 | 2025-11-23 | 独立 agent 客户端 + systemd 单元；commit 3a3f8c6 |
+| Phase 3 | ✅ 完成 | 2025-11-23 | 2025-11-23 | agentx.Client(sshx.Client) + 16 测试；commit aa991eb |
+| Phase 4 | ✅ 完成 | 2025-11-23 | 2025-11-23 | Service.Connect 双路径；commit 84a16a8 |
+| Phase 5 | ✅ 完成 | 2025-11-23 | 2025-11-23 | 前端 Agent 模式支持；commit 99b9aee |
+| Phase 6 | 🔶 部分完成 | 2025-11-23 | — | 6.1/6.2 完成 + 协议 bug 修复 + 协议级 E2E 测试；6.3 真实主机 E2E / 6.4 稳定性测试待真实环境；6.5 待发布 |
 
 > 更新方式：每完成一个任务，在对应行打 ✅；遇到阻塞，在备注中说明。
+>
+> **Phase 6 已知修复的阻塞性 bug**：
+> 1. `agent/connect` 错误使用 `requireAuth`（Agent 无登录会话）→ 改为 token 机器认证；
+> 2. 协议不匹配（客户端未传 host_id）→ 服务端用 token 反查主机，客户端只需 token；
+> 3. token 未 URL 编码（`+` `/` `=` 破坏查询参数）→ `url.QueryEscape`；
+> 4. Agent 主机无 SSH 凭据违反 `credential_id` 外键 → 占位凭据记录（`CredAgentToken`）。
 
 ---
 
