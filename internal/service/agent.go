@@ -126,14 +126,23 @@ func (h *AgentHub) Unregister(agentID string) {
 	h.log.Debug("agent unregistered", "agent_id", agentID)
 }
 
+// defaultAgentCommandTimeout 是 timeoutSeconds<=0 时使用的默认命令超时。
+// 很多调用方（探测/部署/备份）不显式设置 sshx.RunOptions.Timeout，
+// 若直接把 0 传给 time.After 会导致命令立刻"超时"。
+const defaultAgentCommandTimeout = 10 * time.Minute
+
 // SendCommand sends a command to the Agent identified by agentID and waits for
 // the result. Returns ErrAgentNotConnected if no Agent connection exists.
+// timeoutSeconds<=0 时使用 defaultAgentCommandTimeout。
 func (h *AgentHub) SendCommand(ctx context.Context, agentID string, cmd string, timeoutSeconds int) (*AgentResult, error) {
 	h.mu.Lock()
 	ac, ok := h.conns[agentID]
 	h.mu.Unlock()
 	if !ok {
 		return nil, ErrAgentNotConnected
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = int(defaultAgentCommandTimeout / time.Second)
 	}
 
 	cmdID := fmt.Sprintf("cmd-%d", time.Now().UnixNano())
@@ -154,6 +163,7 @@ func (h *AgentHub) SendCommand(ctx context.Context, agentID string, cmd string, 
 		Cmd:       cmd,
 		Timeout:   timeoutSeconds,
 	}
+	timeout := time.Duration(timeoutSeconds) * time.Second
 
 	if err := ac.conn.WriteJSON(command); err != nil {
 		h.log.Error("agent send command failed", "agent_id", agentID, "cmd_id", cmdID, "error", err)
@@ -166,7 +176,7 @@ func (h *AgentHub) SendCommand(ctx context.Context, agentID string, cmd string, 
 		return result, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case <-time.After(time.Duration(timeoutSeconds) * time.Second):
+	case <-time.After(timeout):
 		return nil, fmt.Errorf("agent command timeout after %d seconds", timeoutSeconds)
 	}
 }
