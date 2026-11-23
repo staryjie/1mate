@@ -83,6 +83,7 @@ type Host struct {
 	HostKeyFingerpr   string       `json:"host_key_fingerprint"`
 	SudoMode          SudoMode     `json:"sudo_mode"`
 	SudoCredentialID  string       `json:"sudo_credential_id"`
+	ConnectionType    string       `json:"connection_type"` // "ssh" or "agent", default "ssh"
 	Status            HostStatus   `json:"status"`
 	StatusMessage     string       `json:"status_message"`
 	LastProbeAt       *time.Time   `json:"last_probe_at"`

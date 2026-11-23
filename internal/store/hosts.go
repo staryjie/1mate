@@ -8,14 +8,14 @@ import (
 )
 
 const hostColumns = `id, name, address, ssh_port, ssh_user, auth_type, credential_id, host_key_fingerprint,
-	sudo_mode, sudo_credential_id, status, status_message, last_probe_at, created_at, updated_at`
+	sudo_mode, sudo_credential_id, connection_type, status, status_message, last_probe_at, created_at, updated_at`
 
 func (s *Store) scanHost(sc interface{ Scan(...any) error }) (*model.Host, error) {
 	var h model.Host
 	var lastProbe sql.NullString
 	var created, updated string
 	if err := sc.Scan(&h.ID, &h.Name, &h.Address, &h.SSHPort, &h.SSHUser, &h.AuthType, &h.CredentialID,
-		&h.HostKeyFingerpr, &h.SudoMode, &h.SudoCredentialID, &h.Status, &h.StatusMessage, &lastProbe,
+		&h.HostKeyFingerpr, &h.SudoMode, &h.SudoCredentialID, &h.ConnectionType, &h.Status, &h.StatusMessage, &lastProbe,
 		&created, &updated); err != nil {
 		return nil, mapErr(err)
 	}
@@ -29,9 +29,9 @@ func (s *Store) scanHost(sc interface{ Scan(...any) error }) (*model.Host, error
 
 func (s *Store) CreateHost(h *model.Host) error {
 	ts := now()
-	_, err := s.db.Exec(`INSERT INTO hosts(`+hostColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.Exec(`INSERT INTO hosts(`+hostColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		h.ID, h.Name, h.Address, h.SSHPort, h.SSHUser, h.AuthType, h.CredentialID, h.HostKeyFingerpr,
-		h.SudoMode, h.SudoCredentialID, h.Status, h.StatusMessage, nil, ts, ts)
+		h.SudoMode, h.SudoCredentialID, h.ConnectionType, h.Status, h.StatusMessage, nil, ts, ts)
 	if err != nil {
 		return err
 	}
@@ -62,10 +62,10 @@ func (s *Store) ListHosts() ([]model.Host, error) {
 
 func (s *Store) UpdateHost(h *model.Host) error {
 	res, err := s.db.Exec(`UPDATE hosts SET name=?, address=?, ssh_port=?, ssh_user=?, auth_type=?,
-		credential_id=?, host_key_fingerprint=?, sudo_mode=?, sudo_credential_id=?, status=?,
-		status_message=?, updated_at=? WHERE id=?`,
+		credential_id=?, host_key_fingerprint=?, sudo_mode=?, sudo_credential_id=?, connection_type=?,
+		status=?, status_message=?, updated_at=? WHERE id=?`,
 		h.Name, h.Address, h.SSHPort, h.SSHUser, h.AuthType, h.CredentialID, h.HostKeyFingerpr,
-		h.SudoMode, h.SudoCredentialID, h.Status, h.StatusMessage, now(), h.ID)
+		h.SudoMode, h.SudoCredentialID, h.ConnectionType, h.Status, h.StatusMessage, now(), h.ID)
 	if err != nil {
 		return err
 	}
