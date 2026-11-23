@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"1mate/internal/agentx"
 	"1mate/internal/cryptox"
 	"1mate/internal/model"
 	"1mate/internal/redact"
@@ -114,7 +115,17 @@ func (s *Service) sudoFor(h *model.Host) (sshx.Sudo, error) {
 }
 
 // Connect opens a session for a job and registers secrets for redaction.
+// For Agent-mode hosts it returns an agentx.Client backed by the WebSocket
+// connection; for SSH-mode hosts it dials via s.Dial.
 func (s *Service) Connect(h *model.Host) (sshx.Client, sshx.Sudo, error) {
+	if h.ConnectionType == model.ConnTypeAgent {
+		return s.connectAgent(h)
+	}
+	return s.connectSSH(h)
+}
+
+// connectSSH opens an agentless SSH session for the host.
+func (s *Service) connectSSH(h *model.Host) (sshx.Client, sshx.Sudo, error) {
 	auth, err := s.sshAuth(h)
 	if err != nil {
 		return nil, sshx.Sudo{}, err
@@ -126,6 +137,42 @@ func (s *Service) Connect(h *model.Host) (sshx.Client, sshx.Sudo, error) {
 		return nil, sshx.Sudo{}, err
 	}
 	return s.Dial(h.Address, h.SSHPort, auth), sudo, nil
+}
+
+// connectAgent opens an Agent-backed session for the host. No SSH credentials
+// are needed; the Agent WebSocket connection carries all commands.
+func (s *Service) connectAgent(h *model.Host) (sshx.Client, sshx.Sudo, error) {
+	if s.agentHub == nil {
+		return nil, sshx.Sudo{}, errors.New("agent hub not initialized")
+	}
+	if !s.agentHub.IsConnected(h.AgentID) {
+		return nil, sshx.Sudo{}, fmt.Errorf("agent %s not connected", h.AgentID)
+	}
+	commander := agentCommander{svc: s}
+	client := agentx.New(h.AgentID, commander)
+	return client, sshx.Sudo{}, nil
+}
+
+// agentCommander adapts Service.SendAgentCommand to the agentx.AgentCommander
+// interface, converting *AgentResult to sshx.Result.
+type agentCommander struct {
+	svc *Service
+}
+
+func (a agentCommander) SendCommand(ctx context.Context, agentID string, cmd string, timeoutSeconds int) (sshx.Result, error) {
+	res, err := a.svc.SendAgentCommand(ctx, agentID, cmd, timeoutSeconds)
+	if err != nil {
+		return sshx.Result{}, err
+	}
+	return sshx.Result{
+		ExitCode: res.ExitCode,
+		Stdout:   res.Stdout,
+		Stderr:   res.Stderr,
+	}, nil
+}
+
+func (a agentCommander) IsConnected(agentID string) bool {
+	return a.svc.AgentConnected(agentID)
 }
 
 // dockerPrefix returns the docker command prefix, honouring the case where the
