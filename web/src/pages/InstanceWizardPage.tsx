@@ -83,7 +83,10 @@ export default function InstanceWizardPage() {
     () =>
       (hosts.data?.hosts ?? []).map((h) => ({
         value: h.id,
-        label: `${h.name} (${h.address})`,
+        label:
+          h.connection_type === 'agent'
+            ? `${h.name} (Agent · ${h.agent_id || h.address})`
+            : `${h.name} (${h.address})`,
         disabled: h.status !== 'ok' && h.status !== 'compose_v1',
       })),
     [hosts.data],

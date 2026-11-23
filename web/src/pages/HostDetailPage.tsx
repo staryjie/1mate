@@ -312,7 +312,17 @@ export default function HostDetailPage() {
           {
             key: 'terminal',
             label: '终端',
-            children: <Terminal hostId={host.id} />,
+            children:
+              host.connection_type === 'agent' ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="Agent 模式暂不支持 Web 终端"
+                  description="Agent 客户端通过非交互式命令通道执行运维操作，交互式 PTY 通道尚未实现。如需交互式终端，请改用 SSH 连接方式。"
+                />
+              ) : (
+                <Terminal hostId={host.id} />
+              ),
           },
           {
             key: 'info',
@@ -320,16 +330,32 @@ export default function HostDetailPage() {
             children: (
               <Descriptions bordered size="small" column={{ xs: 1, md: 2 }}>
                 <Descriptions.Item label="名称">{host.name}</Descriptions.Item>
+                <Descriptions.Item label="连接方式">
+                  {host.connection_type === 'agent' ? 'Agent（内网主动连接）' : 'SSH（无代理直连）'}
+                </Descriptions.Item>
                 <Descriptions.Item label="地址">
                   <span className="mono">{host.address}</span>
                 </Descriptions.Item>
-                <Descriptions.Item label="SSH 端口">{host.ssh_port}</Descriptions.Item>
-                <Descriptions.Item label="SSH 用户">{host.ssh_user}</Descriptions.Item>
-                <Descriptions.Item label="认证方式">{host.auth_type === 'key' ? '私钥' : '密码'}</Descriptions.Item>
-                <Descriptions.Item label="sudo 方式">{host.sudo_mode}</Descriptions.Item>
-                <Descriptions.Item label="主机指纹" span={2}>
-                  <span className="mono">{host.host_key_fingerprint || '尚未固定'}</span>
-                </Descriptions.Item>
+                {host.connection_type === 'agent' ? (
+                  <>
+                    <Descriptions.Item label="Agent ID">
+                      <span className="mono">{host.agent_id || '—'}</span>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="接入令牌">
+                      {host.agent_token_set ? '已配置（不会显示）' : '未配置'}
+                    </Descriptions.Item>
+                  </>
+                ) : (
+                  <>
+                    <Descriptions.Item label="SSH 端口">{host.ssh_port}</Descriptions.Item>
+                    <Descriptions.Item label="SSH 用户">{host.ssh_user}</Descriptions.Item>
+                    <Descriptions.Item label="认证方式">{host.auth_type === 'key' ? '私钥' : '密码'}</Descriptions.Item>
+                    <Descriptions.Item label="sudo 方式">{host.sudo_mode}</Descriptions.Item>
+                    <Descriptions.Item label="主机指纹" span={2}>
+                      <span className="mono">{host.host_key_fingerprint || '尚未固定'}</span>
+                    </Descriptions.Item>
+                  </>
+                )}
                 <Descriptions.Item label="最近探测">{formatDateTime(host.last_probe_at)}</Descriptions.Item>
                 <Descriptions.Item label="状态说明">{host.status_message || '—'}</Descriptions.Item>
               </Descriptions>

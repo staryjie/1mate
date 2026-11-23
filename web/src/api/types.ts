@@ -88,6 +88,9 @@ export interface Host {
   updated_at: string
   has_credential: boolean
   has_sudo_password: boolean
+  connection_type: 'ssh' | 'agent'
+  agent_id?: string
+  agent_token_set?: boolean
   capabilities?: Capabilities
   instance_count?: number
 }

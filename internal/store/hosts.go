@@ -25,6 +25,7 @@ func (s *Store) scanHost(sc interface{ Scan(...any) error }) (*model.Host, error
 	h.UpdatedAt = parseTime(updated)
 	h.HasCredential = h.CredentialID != ""
 	h.HasSudoPass = h.SudoCredentialID != ""
+	h.AgentTokenSet = h.AgentToken != ""
 	return &h, nil
 }
 

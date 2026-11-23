@@ -245,8 +245,14 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit.Log(s.actor(r), "host.create", "host", h.ID, map[string]any{
 		"name": h.Name, "address": h.Address, "ssh_user": h.SSHUser, "auth_type": h.AuthType,
+		"connection_type": h.ConnectionType,
 	}, r)
-	writeJSON(w, http.StatusCreated, h)
+	// Agent 令牌只在创建时返回一次，前端需要它来配置 Agent 客户端。
+	resp := map[string]any{"host": h}
+	if h.ConnectionType == model.ConnTypeAgent {
+		resp["agent_token"] = h.AgentToken
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
@@ -274,7 +280,12 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit.Log(s.actor(r), "host.update", "host", h.ID, map[string]any{"name": h.Name}, r)
-	writeJSON(w, http.StatusOK, h)
+	resp := map[string]any{"host": h}
+	if h.ConnectionType == model.ConnTypeAgent && in.AgentToken != "" {
+		// 只有显式轮换令牌时才返回新令牌。
+		resp["agent_token"] = h.AgentToken
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {

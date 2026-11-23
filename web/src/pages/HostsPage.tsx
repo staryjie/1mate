@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { App, Button, Drawer, Form, Input, InputNumber, Radio, Select, Space, Table, Typography } from 'antd'
+import { App, Button, Drawer, Form, Input, InputNumber, Radio, Select, Space, Table, Tag, Typography } from 'antd'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined, ApiOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
@@ -21,6 +21,9 @@ interface HostFormValues {
   sudo_mode: 'none' | 'root' | 'nopasswd' | 'password'
   sudo_password?: string
   trust_fingerprint?: boolean
+  connection_type: 'ssh' | 'agent'
+  agent_id?: string
+  agent_token?: string
 }
 
 export default function HostsPage() {
@@ -36,6 +39,7 @@ export default function HostsPage() {
   const [saving, setSaving] = useState(false)
   const authType = Form.useWatch('auth_type', form)
   const sudoMode = Form.useWatch('sudo_mode', form)
+  const connType = Form.useWatch('connection_type', form)
 
   useEffect(() => {
     if (!open) return
@@ -47,10 +51,12 @@ export default function HostsPage() {
         ssh_user: editing.ssh_user,
         auth_type: editing.auth_type,
         sudo_mode: editing.sudo_mode,
+        connection_type: editing.connection_type ?? 'ssh',
+        agent_id: editing.agent_id,
       })
     } else {
       form.resetFields()
-      form.setFieldsValue({ ssh_port: 22, auth_type: 'key', sudo_mode: 'none' })
+      form.setFieldsValue({ ssh_port: 22, auth_type: 'key', sudo_mode: 'none', connection_type: 'ssh' })
     }
     setTestResult(null)
   }, [open, editing, form])
@@ -96,25 +102,35 @@ export default function HostsPage() {
     try {
       const payload: Record<string, unknown> = {
         name: values.name,
-        address: values.address,
-        ssh_port: values.ssh_port,
-        ssh_user: values.ssh_user,
-        auth_type: values.auth_type,
-        sudo_mode: values.sudo_mode,
+        connection_type: values.connection_type ?? 'ssh',
       }
-      if (values.private_key) payload.private_key = values.private_key
-      if (values.password) payload.password = values.password
-      if (values.key_passphrase) payload.key_passphrase = values.key_passphrase
-      if (values.sudo_password) payload.sudo_password = values.sudo_password
-      if (values.trust_fingerprint) payload.trust_fingerprint = true
+      if (values.connection_type === 'agent') {
+        // Agent 模式不需要 SSH 地址、端口、用户与凭据。
+        if (values.address) payload.address = values.address
+        if (values.agent_id) payload.agent_id = values.agent_id
+        if (values.agent_token) payload.agent_token = values.agent_token
+      } else {
+        payload.address = values.address
+        payload.ssh_port = values.ssh_port
+        payload.ssh_user = values.ssh_user
+        payload.auth_type = values.auth_type
+        payload.sudo_mode = values.sudo_mode
+        if (values.private_key) payload.private_key = values.private_key
+        if (values.password) payload.password = values.password
+        if (values.key_passphrase) payload.key_passphrase = values.key_passphrase
+        if (values.sudo_password) payload.sudo_password = values.sudo_password
+        if (values.trust_fingerprint) payload.trust_fingerprint = true
+      }
 
       if (editing) {
-        await api.patch(`/api/v1/hosts/${editing.id}`, payload)
+        const res = await api.patch<{ host: Host; agent_token?: string }>(`/api/v1/hosts/${editing.id}`, payload)
         message.success('主机已更新')
+        if (res.agent_token) showAgentToken(res.agent_token)
       } else {
-        const created = await api.post<Host>('/api/v1/hosts', payload)
+        const res = await api.post<{ host: Host; agent_token?: string }>('/api/v1/hosts', payload)
         message.success('主机已创建，正在探测环境…')
-        await api.post(`/api/v1/hosts/${created.id}/actions/probe`)
+        if (res.agent_token) showAgentToken(res.agent_token)
+        await api.post(`/api/v1/hosts/${res.host.id}/actions/probe`)
       }
       await qc.invalidateQueries({ queryKey: ['hosts'] })
       close()
@@ -123,6 +139,25 @@ export default function HostsPage() {
     } finally {
       setSaving(false)
     }
+  }
+
+  // showAgentToken 展示一次性的 Agent 令牌，供用户配置 Agent 客户端。
+  const showAgentToken = (token: string) => {
+    modal.info({
+      title: 'Agent 接入令牌',
+      width: 640,
+      content: (
+        <div>
+          <Typography.Paragraph type="secondary">
+            该令牌只显示这一次，请复制到目标主机的 /etc/1mate-agent/agent.env：
+          </Typography.Paragraph>
+          <pre className="code-block">AGENT_TOKEN={token}</pre>
+          <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
+            同时需要配置 AGENT_SERVER_URL（平台地址）与 AGENT_HOST_ID（主机 ID）。
+          </Typography.Paragraph>
+        </div>
+      ),
+    })
   }
 
   const remove = (host: Host) => {
@@ -180,11 +215,24 @@ export default function HostsPage() {
           { title: '名称', dataIndex: 'name' },
           {
             title: '地址',
-            render: (_, r) => (
-              <span className="mono">
-                {r.ssh_user}@{r.address}:{r.ssh_port}
-              </span>
-            ),
+            render: (_, r) =>
+              r.connection_type === 'agent' ? (
+                <span className="mono">Agent · {r.agent_id || '—'}</span>
+              ) : (
+                <span className="mono">
+                  {r.ssh_user}@{r.address}:{r.ssh_port}
+                </span>
+              ),
+          },
+          {
+            title: '连接方式',
+            width: 110,
+            render: (_, r) =>
+              r.connection_type === 'agent' ? (
+                <Tag color="purple">Agent</Tag>
+              ) : (
+                <Tag color="blue">SSH</Tag>
+              ),
           },
           { title: '状态', render: (_, r) => <HostStatusTag status={r.status} /> },
           {
@@ -245,64 +293,95 @@ export default function HostsPage() {
           <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入名称' }]}>
             <Input placeholder="例如 home-server" />
           </Form.Item>
-          <Form.Item name="address" label="地址" rules={[{ required: true, message: '请输入 IP 或域名' }]}>
-            <Input placeholder="192.168.1.10" />
-          </Form.Item>
-          <Space style={{ display: 'flex' }} align="start">
-            <Form.Item name="ssh_port" label="SSH 端口" rules={[{ required: true }]} style={{ width: 140 }}>
-              <InputNumber min={1} max={65535} style={{ width: '100%' }} />
-            </Form.Item>
-            <Form.Item name="ssh_user" label="SSH 用户" rules={[{ required: true, message: '请输入用户' }]} style={{ flex: 1 }}>
-              <Input placeholder="deploy" />
-            </Form.Item>
-          </Space>
-          <Form.Item name="auth_type" label="认证方式">
+          <Form.Item name="connection_type" label="连接方式">
             <Radio.Group>
-              <Radio.Button value="key">私钥</Radio.Button>
-              <Radio.Button value="password">密码</Radio.Button>
+              <Radio.Button value="ssh">SSH（无代理直连）</Radio.Button>
+              <Radio.Button value="agent">Agent（内网主机主动连接）</Radio.Button>
             </Radio.Group>
           </Form.Item>
-          {authType === 'password' ? (
-            <Form.Item
-              name="password"
-              label={editing ? 'SSH 密码（留空则不修改）' : 'SSH 密码'}
-              rules={editing ? [] : [{ required: true, message: '请输入密码' }]}
-            >
-              <Input.Password autoComplete="new-password" />
-            </Form.Item>
-          ) : (
+          {connType === 'agent' ? (
             <>
-              <Form.Item
-                name="private_key"
-                label={editing ? '私钥（留空则不修改）' : '私钥（PEM / OpenSSH）'}
-                rules={editing ? [] : [{ required: true, message: '请粘贴私钥' }]}
-              >
-                <Input.TextArea rows={5} className="mono" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
+              <Form.Item name="agent_id" label="Agent ID（可选）" extra="留空则自动生成，需与目标主机上的 AGENT_HOST_ID 一致">
+                <Input placeholder="agent-xxxxxxxx" />
               </Form.Item>
-              <Form.Item name="key_passphrase" label="私钥口令（可选）">
+              <Form.Item
+                name="agent_token"
+                label={editing ? 'Agent 接入令牌（留空则不修改）' : 'Agent 接入令牌（可选，留空自动生成）'}
+                rules={editing ? [] : [{ min: 16, message: '令牌至少 16 个字符' }]}
+                extra="预共享密钥，用于 Agent 客户端向平台认证；保存后会以明文形式一次性展示"
+              >
                 <Input.Password autoComplete="new-password" />
               </Form.Item>
+              <Form.Item name="address" label="备注地址（可选）" extra="仅用于标识，Agent 模式下平台不依赖该地址">
+                <Input placeholder="例如 内网 NAS" />
+              </Form.Item>
+              <Typography.Paragraph type="secondary">
+                Agent 模式下无需 SSH 凭据。目标主机需运行 1mate-agent 客户端并主动连接平台，
+                适用于没有公网地址的内网服务器。
+              </Typography.Paragraph>
             </>
-          )}
-          <Form.Item name="sudo_mode" label="sudo 方式" extra="安装 Docker 等系统级操作需要提权">
-            <Select
-              options={[
-                { value: 'none', label: '不使用 sudo' },
-                { value: 'root', label: '直接使用 root 用户' },
-                { value: 'nopasswd', label: 'sudo -n（免密）' },
-                { value: 'password', label: 'sudo 需要密码' },
-              ]}
-            />
-          </Form.Item>
-          {sudoMode === 'password' && (
-            <Form.Item
-              name="sudo_password"
-              label={editing ? 'sudo 密码（留空则不修改）' : 'sudo 密码'}
-              rules={editing ? [] : [{ required: true, message: '请输入 sudo 密码' }]}
-              extra="密码仅用于 sudo 提权，通过 stdin 传递，不会出现在命令行或日志中"
-            >
-              <Input.Password autoComplete="new-password" />
-            </Form.Item>
+          ) : (
+            <>
+              <Form.Item name="address" label="地址" rules={[{ required: true, message: '请输入 IP 或域名' }]}>
+                <Input placeholder="192.168.1.10" />
+              </Form.Item>
+              <Space style={{ display: 'flex' }} align="start">
+                <Form.Item name="ssh_port" label="SSH 端口" rules={[{ required: true }]} style={{ width: 140 }}>
+                  <InputNumber min={1} max={65535} style={{ width: '100%' }} />
+                </Form.Item>
+                <Form.Item name="ssh_user" label="SSH 用户" rules={[{ required: true, message: '请输入用户' }]} style={{ flex: 1 }}>
+                  <Input placeholder="deploy" />
+                </Form.Item>
+              </Space>
+              <Form.Item name="auth_type" label="认证方式">
+                <Radio.Group>
+                  <Radio.Button value="key">私钥</Radio.Button>
+                  <Radio.Button value="password">密码</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+              {authType === 'password' ? (
+                <Form.Item
+                  name="password"
+                  label={editing ? 'SSH 密码（留空则不修改）' : 'SSH 密码'}
+                  rules={editing ? [] : [{ required: true, message: '请输入密码' }]}
+                >
+                  <Input.Password autoComplete="new-password" />
+                </Form.Item>
+              ) : (
+                <>
+                  <Form.Item
+                    name="private_key"
+                    label={editing ? '私钥（留空则不修改）' : '私钥（PEM / OpenSSH）'}
+                    rules={editing ? [] : [{ required: true, message: '请粘贴私钥' }]}
+                  >
+                    <Input.TextArea rows={5} className="mono" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
+                  </Form.Item>
+                  <Form.Item name="key_passphrase" label="私钥口令（可选）">
+                    <Input.Password autoComplete="new-password" />
+                  </Form.Item>
+                </>
+              )}
+              <Form.Item name="sudo_mode" label="sudo 方式" extra="安装 Docker 等系统级操作需要提权">
+                <Select
+                  options={[
+                    { value: 'none', label: '不使用 sudo' },
+                    { value: 'root', label: '直接使用 root 用户' },
+                    { value: 'nopasswd', label: 'sudo -n（免密）' },
+                    { value: 'password', label: 'sudo 需要密码' },
+                  ]}
+                />
+              </Form.Item>
+              {sudoMode === 'password' && (
+                <Form.Item
+                  name="sudo_password"
+                  label={editing ? 'sudo 密码（留空则不修改）' : 'sudo 密码'}
+                  rules={editing ? [] : [{ required: true, message: '请输入 sudo 密码' }]}
+                  extra="密码仅用于 sudo 提权，通过 stdin 传递，不会出现在命令行或日志中"
+                >
+                  <Input.Password autoComplete="new-password" />
+                </Form.Item>
+              )}
+            </>
           )}
           {testResult && (
             <Form.Item>
@@ -328,11 +407,13 @@ export default function HostsPage() {
               )}
             </Form.Item>
           )}
-          <Space>
-            <Button icon={<ApiOutlined />} loading={testing} onClick={() => void testConnection()}>
-              测试连接
-            </Button>
-          </Space>
+          {connType !== 'agent' && (
+            <Space>
+              <Button icon={<ApiOutlined />} loading={testing} onClick={() => void testConnection()}>
+                测试连接
+              </Button>
+            </Space>
+          )}
         </Form>
       </Drawer>
     </>

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"1mate/internal/compose"
+	"1mate/internal/cryptox"
 	"1mate/internal/ids"
 	"1mate/internal/model"
 	"1mate/internal/probe"
@@ -20,27 +21,36 @@ import (
 var hostNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]{1,63}$`)
 var userPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.-]{0,31}$`)
 var hostPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{2,253}$`)
+var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // HostInput is the create/update payload for a host.
 type HostInput struct {
-	Name          string           `json:"name"`
-	Address       string           `json:"address"`
-	SSHPort       int              `json:"ssh_port"`
-	SSHUser       string           `json:"ssh_user"`
+	Name          string            `json:"name"`
+	Address       string            `json:"address"`
+	SSHPort       int               `json:"ssh_port"`
+	SSHUser       string            `json:"ssh_user"`
 	AuthType      model.HostAuthType `json:"auth_type"`
-	Password      string           `json:"password"`
-	PrivateKey    string           `json:"private_key"`
-	KeyPassphrase string           `json:"key_passphrase"`
-	SudoMode      model.SudoMode   `json:"sudo_mode"`
-	SudoPassword  string           `json:"sudo_password"`
+	Password      string            `json:"password"`
+	PrivateKey    string            `json:"private_key"`
+	KeyPassphrase string            `json:"key_passphrase"`
+	SudoMode      model.SudoMode    `json:"sudo_mode"`
+	SudoPassword  string            `json:"sudo_password"`
 	// TrustFingerprint accepts a new host key after an explicit change.
 	TrustFingerprint bool `json:"trust_fingerprint"`
+	// ConnectionType selects the transport: "ssh" (agentless) or "agent".
+	ConnectionType string `json:"connection_type"`
+	// AgentToken is the pre-shared secret the Agent client presents.
+	AgentToken string `json:"agent_token"`
+	// AgentID identifies the Agent client; generated when empty.
+	AgentID string `json:"agent_id"`
 }
 
 func (in *HostInput) Normalize() {
 	in.Name = strings.TrimSpace(in.Name)
 	in.Address = strings.TrimSpace(in.Address)
 	in.SSHUser = strings.TrimSpace(in.SSHUser)
+	in.AgentToken = strings.TrimSpace(in.AgentToken)
+	in.AgentID = strings.TrimSpace(in.AgentID)
 	if in.SSHPort == 0 {
 		in.SSHPort = 22
 	}
@@ -49,6 +59,13 @@ func (in *HostInput) Normalize() {
 	}
 	if in.SudoMode == "" {
 		in.SudoMode = model.SudoNone
+	}
+	if in.ConnectionType == "" {
+		in.ConnectionType = model.ConnTypeSSH
+	}
+	// Agent 模式下地址仅作标识，允许留空（回退到 AgentID）。
+	if in.ConnectionType == model.ConnTypeAgent && in.Address == "" {
+		in.Address = in.AgentID
 	}
 }
 
@@ -60,6 +77,19 @@ func validateHostFields(in HostInput, requireSecret bool) error {
 	var problems []string
 	if !hostNamePattern.MatchString(in.Name) {
 		problems = append(problems, "name must be 2-64 characters of letters, digits, dot, dash, underscore or space")
+	}
+	if in.ConnectionType == model.ConnTypeAgent {
+		// Agent 模式不需要 SSH 地址、端口、用户与凭据。
+		if in.AgentToken != "" && len(in.AgentToken) < 16 {
+			problems = append(problems, "agent_token must be at least 16 characters")
+		}
+		if in.AgentID != "" && !agentIDPattern.MatchString(in.AgentID) {
+			problems = append(problems, "agent_id must be 1-64 characters of letters, digits, dot, dash or underscore")
+		}
+		if len(problems) > 0 {
+			return fmt.Errorf("%w: %s", ErrValidation, strings.Join(problems, "; "))
+		}
+		return nil
 	}
 	if !hostPattern.MatchString(in.Address) {
 		problems = append(problems, "address must be a hostname or IP address")
@@ -106,6 +136,10 @@ func (s *Service) CreateHost(in HostInput) (*model.Host, error) {
 	}
 	if existing, err := s.findHostByName(in.Name); err == nil && existing != nil {
 		return nil, fmt.Errorf("%w: a host named %q already exists", ErrConflict, in.Name)
+	}
+
+	if in.ConnectionType == model.ConnTypeAgent {
+		return s.createAgentHost(in)
 	}
 
 	credID := ids.New()
@@ -172,6 +206,47 @@ func (s *Service) CreateHost(in HostInput) (*model.Host, error) {
 	return h, nil
 }
 
+// createAgentHost creates a host that is managed through an Agent client
+// instead of agentless SSH. No SSH credential is required; a pre-shared
+// agent token authenticates the Agent.
+func (s *Service) createAgentHost(in HostInput) (*model.Host, error) {
+	agentID := in.AgentID
+	if agentID == "" {
+		agentID = "agent-" + ids.New()[:12]
+	}
+	token := in.AgentToken
+	if token == "" {
+		var err error
+		token, err = cryptox.RandomToken(32)
+		if err != nil {
+			return nil, err
+		}
+	}
+	s.Red.Add(token)
+	address := in.Address
+	if address == "" {
+		address = agentID
+	}
+	h := &model.Host{
+		ID:             ids.New(),
+		Name:           in.Name,
+		Address:        address,
+		SSHPort:        in.SSHPort,
+		SSHUser:        in.SSHUser,
+		AuthType:       in.AuthType,
+		ConnectionType: model.ConnTypeAgent,
+		AgentToken:     token,
+		AgentID:        agentID,
+		SudoMode:       model.SudoNone,
+		Status:         model.HostUnknown,
+	}
+	if err := s.Store.CreateHost(h); err != nil {
+		return nil, err
+	}
+	h.AgentTokenSet = true
+	return h, nil
+}
+
 func (s *Service) storePlainCredential(kind model.CredentialKind, plain string) (string, error) {
 	id := ids.New()
 	ct, err := s.Box.Encrypt(plain, credentialAAD(id))
@@ -222,6 +297,15 @@ func (s *Service) UpdateHost(id string, in HostInput) (*model.Host, error) {
 	if in.SudoMode == "" {
 		in.SudoMode = h.SudoMode
 	}
+	if in.ConnectionType == "" {
+		in.ConnectionType = h.ConnectionType
+	}
+	if in.ConnectionType == "" {
+		in.ConnectionType = model.ConnTypeSSH
+	}
+	if in.AgentID == "" {
+		in.AgentID = h.AgentID
+	}
 	if err := validateHostFields(in, false); err != nil {
 		return nil, err
 	}
@@ -230,6 +314,11 @@ func (s *Service) UpdateHost(id string, in HostInput) (*model.Host, error) {
 		if other, err := s.findHostByName(in.Name); err == nil && other != nil && other.ID != h.ID {
 			return nil, fmt.Errorf("%w: a host named %q already exists", ErrConflict, in.Name)
 		}
+	}
+
+	// Agent 模式不需要 SSH 凭据，单独处理令牌与 AgentID。
+	if in.ConnectionType == model.ConnTypeAgent {
+		return s.updateAgentHost(h, in)
 	}
 
 	cred, credErr := s.Store.GetCredential(h.CredentialID)
@@ -338,6 +427,39 @@ func (s *Service) UpdateHost(id string, in HostInput) (*model.Host, error) {
 	if err := s.Store.UpdateHost(h); err != nil {
 		return nil, err
 	}
+	return h, nil
+}
+
+// updateAgentHost applies an update to an Agent-managed host. SSH credentials
+// are not touched; only the name, address, agent id and agent token change.
+func (s *Service) updateAgentHost(h *model.Host, in HostInput) (*model.Host, error) {
+	if in.AgentToken != "" {
+		s.Red.Add(in.AgentToken)
+		h.AgentToken = in.AgentToken
+	}
+	if in.AgentID != "" {
+		h.AgentID = in.AgentID
+	}
+	if in.AgentToken == "" && h.AgentToken == "" {
+		var err error
+		h.AgentToken, err = cryptox.RandomToken(32)
+		if err != nil {
+			return nil, err
+		}
+		s.Red.Add(h.AgentToken)
+	}
+	h.Name = in.Name
+	if in.Address != "" {
+		h.Address = in.Address
+	}
+	h.ConnectionType = model.ConnTypeAgent
+	h.SudoMode = model.SudoNone
+	h.Status = model.HostUnknown
+	h.StatusMessage = ""
+	if err := s.Store.UpdateHost(h); err != nil {
+		return nil, err
+	}
+	h.AgentTokenSet = h.AgentToken != ""
 	return h, nil
 }
 
