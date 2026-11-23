@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -23,23 +23,48 @@ export default function ImageSyncPanel({ hostId }: { hostId: string }) {
   const [syncOpen, setSyncOpen] = useState(false)
   const [sourceHostId, setSourceHostId] = useState<string | undefined>()
   const [manualImages, setManualImages] = useState('')
-  const [syncedImages, setSyncedImages] = useState<string[]>([])
+  // 持久化到 localStorage，页面刷新后不丢失已同步镜像列表
+  const [syncedImages, setSyncedImages] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(`1mate-synced-images-${hostId}`)
+      return raw ? JSON.parse(raw) : []
+    } catch {
+      return []
+    }
+  })
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`1mate-synced-images-${hostId}`, JSON.stringify(syncedImages))
+    } catch {
+      // ignore quota errors
+    }
+  }, [hostId, syncedImages])
 
   const hosts = useHosts()
   const precheck = useImagePrecheck(hostId, syncedImages)
   const sync = useImageSync(hostId)
 
   const results: ImagePrecheckResult[] = precheck.data?.results ?? []
-  const missing = results.filter((r) => !r.present)
 
-  // 合并 syncedImages 中不在 results 中的镜像（标记为 present，因刚刚同步成功）
+  // 合并 syncedImages 中的镜像：已同步的镜像始终标记为 present，无论 precheck 是否已刷新
   const mergedResults = useMemo(() => {
-    const existing = new Set(results.map((r) => r.image))
+    const syncedSet = new Set(syncedImages)
+    // 现有结果中，如果镜像在 syncedImages 中，标记为已存在
+    const merged = results.map((r) => ({
+      image: r.image,
+      present: r.present || syncedSet.has(r.image),
+    }))
+    // syncedImages 中不在 results 中的镜像，标记为已存在
+    const existing = new Set(merged.map((r) => r.image))
     const extra = syncedImages
       .filter((img) => !existing.has(img))
       .map((img) => ({ image: img, present: true }))
-    return [...results, ...extra]
+    return [...merged, ...extra]
   }, [results, syncedImages])
+
+  // 基于 mergedResults 计算缺失，这样已同步（syncedImages）的镜像不会被算作缺失
+  const missing = mergedResults.filter((r) => !r.present)
 
   const otherHosts = (hosts.data?.hosts ?? []).filter(
     (h) => h.id !== hostId && h.status === 'ok',

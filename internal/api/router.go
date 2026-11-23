@@ -1,7 +1,10 @@
 package api
 
 import (
+	"bufio"
+	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -175,6 +178,15 @@ func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack implements http.Hijacker so WebSocket upgrades (gorilla/websocket)
+// work even when this wrapper is in the middleware chain.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hj.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not implement http.Hijacker")
 }
 
 // RequestLogger logs one line per request without bodies, and skips noisy SSE

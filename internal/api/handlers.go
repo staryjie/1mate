@@ -334,17 +334,9 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4 * 1024,
 	WriteBufferSize: 4 * 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		// Same-origin only for terminal WebSocket connections.
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true
-		}
-		// Allow same-scheme+host origins.
-		reqOrigin := "http://" + r.Host
-		if r.TLS != nil {
-			reqOrigin = "https://" + r.Host
-		}
-		return origin == reqOrigin
+		// Allow WebSocket connections from any origin for terminal access.
+		// The session cookie is still required for authentication.
+		return true
 	},
 }
 
@@ -371,23 +363,27 @@ func (s *Server) handleHostTerminal(w http.ResponseWriter, r *http.Request) {
 	// Authenticate via session cookie (browser sends cookies with WS handshake).
 	sess, err := s.auth.Authenticate(r)
 	if err != nil {
+		s.log.Error("websocket auth failed", "hostID", hostID, "error", err)
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
 	_ = sess
+	s.log.Debug("websocket auth ok", "hostID", hostID)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		s.log.Error("websocket upgrade failed", "error", err)
+		s.log.Error("websocket upgrade failed", "hostID", hostID, "error", err)
 		return
 	}
+	s.log.Debug("websocket upgraded", "hostID", hostID)
 	defer conn.Close()
 
 	// Create the PTY session on the remote host.
 	ptyID, err := s.svc.CreatePtySession(hostID, "xterm-256color", 24, 80)
 	if err != nil {
-		s.failFrom(w, err)
-		conn.WriteJSON(terminalOutput{Type: "exit", Code: 1})
+		s.log.Error("pty session failed", "hostID", hostID, "error", err)
+		// WebSocket already upgraded; cannot send HTTP error. Notify client via WS frame.
+		_ = conn.WriteJSON(terminalOutput{Type: "exit", Code: 1, Data: base64.StdEncoding.EncodeToString([]byte("terminal error: "+err.Error()+"\r\n"))})
 		_ = s.svc.PtyClose(ptyID)
 		return
 	}

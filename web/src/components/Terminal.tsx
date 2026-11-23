@@ -3,7 +3,7 @@ import { Terminal as XTerm } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import 'xterm/css/xterm.css'
 import { Alert, Button, Space } from 'antd'
-import { PoweroffOutlined } from '@ant-design/icons'
+import { PoweroffOutlined, LogoutOutlined } from '@ant-design/icons'
 
 interface TerminalProps {
   hostId: string
@@ -19,7 +19,8 @@ export default function Terminal({ hostId }: TerminalProps) {
   const termRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const wasConnectedRef = useRef(false)
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return
@@ -31,6 +32,7 @@ export default function Terminal({ hostId }: TerminalProps) {
     wsRef.current = ws
 
     ws.onopen = () => {
+      wasConnectedRef.current = true
       setConnected(true)
       setConnecting(false)
       setError(null)
@@ -59,12 +61,21 @@ export default function Terminal({ hostId }: TerminalProps) {
     ws.onerror = (err) => {
       setConnecting(false)
       setError('WebSocket 连接失败')
-      console.error('Terminal WebSocket error:', err)
+      console.error('[1mate Terminal] WebSocket error:', err)
+      console.error('[1mate Terminal] WS URL:', wsUrl)
+      console.error('[1mate Terminal] readyState:', ws.readyState)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setConnected(false)
       setConnecting(false)
+      if (event.code !== 1000 && event.code !== 1006) {
+        console.error('[1mate Terminal] WebSocket closed abnormally:', {
+          code: event.code,
+          reason: event.reason,
+          wasClean: event.wasClean,
+        })
+      }
     }
   }, [hostId])
 
@@ -129,8 +140,16 @@ export default function Terminal({ hostId }: TerminalProps) {
   const disconnect = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.close()
+      wsRef.current = null
     }
     setConnected(false)
+    setConnecting(false)
+    setError(null)
+    if (termRef.current) {
+      termRef.current.dispose()
+      termRef.current = null
+    }
+    fitAddonRef.current = null
   }, [])
 
   const reconnect = useCallback(() => {
@@ -138,7 +157,7 @@ export default function Terminal({ hostId }: TerminalProps) {
     setTimeout(connect, 500)
   }, [disconnect, connect])
 
-  if (!connected && !connecting && !error) {
+  if (!connected && !connecting && !error && !wasConnectedRef.current) {
     return null
   }
 
@@ -155,6 +174,16 @@ export default function Terminal({ hostId }: TerminalProps) {
           }}
         ></span>
         <span>{connected ? '终端已连接' : connecting ? '正在连接…' : '未连接'}</span>
+        {connected ? (
+          <Button
+            size="small"
+            onClick={disconnect}
+            danger
+            icon={<LogoutOutlined />}
+          >
+            断开连接
+          </Button>
+        ) : null}
         <Button
           size="small"
           onClick={reconnect}
