@@ -66,7 +66,8 @@ func run() error {
 	defer st.Close()
 
 	red := redact.New()
-	svc := service.New(st, box, red, cfg.DataDir)
+	agentHub := service.NewAgentHub(logger)
+	svc := service.New(st, box, red, cfg.DataDir, logger, agentHub)
 	jobs := job.NewManager(st, cfg.DataDir, red, cfg.Workers)
 	authMgr := auth.NewManager(st, cfg.SessionTTL, cfg.SessionIdle, cfg.SecureCookie)
 	auditRec := audit.New(st)

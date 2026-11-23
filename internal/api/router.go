@@ -53,6 +53,9 @@ func Router(s *Server, webFS fs.FS, corsAllowed string) http.Handler {
 	// 主机终端 (WebSocket)。
 	mux.Handle("GET /api/v1/hosts/{id}/terminal", s.requireAuth(http.HandlerFunc(s.handleHostTerminal)))
 
+	// Agent 连接 (WebSocket)。
+	mux.Handle("GET /api/v1/agent/connect", s.requireAuth(http.HandlerFunc(s.handleAgentConnect)))
+
 	// Instances.
 	api(http.MethodGet, "/api/v1/instances", s.handleListInstances, false)
 	api(http.MethodPost, "/api/v1/instances", s.handleCreateInstance, false)

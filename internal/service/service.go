@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
@@ -12,6 +13,7 @@ import (
 	"1mate/internal/redact"
 	"1mate/internal/sshx"
 	"1mate/internal/store"
+	"github.com/gorilla/websocket"
 )
 
 var (
@@ -30,6 +32,7 @@ type Service struct {
 	Box     *cryptox.Box
 	Red     *redact.Redactor
 	DataDir string
+	Log     *slog.Logger
 
 	// Dial connects to a host. Replaced by tests.
 	Dial func(addr string, port int, auth sshx.Auth) sshx.Client
@@ -38,6 +41,9 @@ type Service struct {
 	ptyMu     sync.Mutex
 	ptySessions map[string]*ptySession
 	nextPtyID   int
+
+	// agentHub manages active Agent WebSocket connections keyed by agent ID.
+	agentHub *AgentHub
 }
 
 type ptySession struct {
@@ -46,13 +52,15 @@ type ptySession struct {
 	client sshx.Client
 }
 
-func New(st *store.Store, box *cryptox.Box, red *redact.Redactor, dataDir string) *Service {
+func New(st *store.Store, box *cryptox.Box, red *redact.Redactor, dataDir string, log *slog.Logger, agentHub *AgentHub) *Service {
 	return &Service{
 		Store:       st,
 		Box:         box,
 		Red:         red,
 		DataDir:     dataDir,
+		Log:         log,
 		ptySessions: make(map[string]*ptySession),
+		agentHub:    agentHub,
 		Dial: func(addr string, port int, auth sshx.Auth) sshx.Client {
 			return sshx.New(addr, port, auth)
 		},
@@ -242,4 +250,38 @@ func (s *Service) PtyClose(sessionID string) error {
 	_ = ps.pty.Close()
 	_ = ps.client.Close()
 	return nil
+}
+
+// RegisterAgent associates an Agent WebSocket connection with an agent ID and host ID.
+func (s *Service) RegisterAgent(agentID, hostID string, conn *websocket.Conn) {
+	if s.agentHub == nil {
+		s.Log.Error("agent hub not initialized", "agent_id", agentID)
+		_ = conn.Close()
+		return
+	}
+	s.agentHub.Register(agentID, hostID, conn)
+}
+
+// UnregisterAgent removes an Agent WebSocket connection.
+func (s *Service) UnregisterAgent(agentID string) {
+	if s.agentHub == nil {
+		return
+	}
+	s.agentHub.Unregister(agentID)
+}
+
+// SendAgentCommand sends a command to an Agent and waits for the result.
+func (s *Service) SendAgentCommand(ctx context.Context, agentID string, cmd string, timeoutSeconds int) (*AgentResult, error) {
+	if s.agentHub == nil {
+		return nil, ErrAgentNotConnected
+	}
+	return s.agentHub.SendCommand(ctx, agentID, cmd, timeoutSeconds)
+}
+
+// AgentConnected reports whether an Agent is currently connected.
+func (s *Service) AgentConnected(agentID string) bool {
+	if s.agentHub == nil {
+		return false
+	}
+	return s.agentHub.IsConnected(agentID)
 }

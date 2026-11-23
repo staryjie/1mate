@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -42,7 +43,8 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("box: %v", err)
 	}
 	red := redact.New()
-	svc := New(st, box, red, dir)
+	agentHub := NewAgentHub(slog.Default())
+	svc := New(st, box, red, dir, slog.Default(), agentHub)
 	fake := sshx.NewFake("SHA256:test")
 	svc.Dial = func(addr string, port int, auth sshx.Auth) sshx.Client { return fake }
 	return &harness{svc: svc, store: st, fake: fake}

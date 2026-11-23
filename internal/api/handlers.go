@@ -440,6 +440,65 @@ func (s *Server) handleHostTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ---- Agent 连接 (WebSocket) ----
+
+// handleAgentConnect upgrades the connection to a WebSocket and registers the
+// Agent client with the AgentHub. The agent authenticates via its agent_token
+// query parameter; the user authenticates via session cookie.
+func (s *Server) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
+	// Authenticate the user via session cookie.
+	sess, err := s.auth.Authenticate(r)
+	if err != nil {
+		s.log.Error("agent websocket auth failed", "error", err)
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	_ = sess
+
+	agentID := r.URL.Query().Get("agent_id")
+	agentToken := r.URL.Query().Get("agent_token")
+	hostID := r.URL.Query().Get("host_id")
+
+	if agentID == "" || agentToken == "" || hostID == "" {
+		s.log.Error("agent websocket missing parameters", "agent_id", agentID, "host_id", hostID)
+		http.Error(w, "agent_id, agent_token and host_id are required", http.StatusBadRequest)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.log.Error("agent websocket upgrade failed", "agent_id", agentID, "error", err)
+		return
+	}
+
+	// Validate agent_token against the host record.
+	h, err := s.store.GetHost(hostID)
+	if err != nil {
+		s.log.Error("agent host not found", "host_id", hostID, "error", err)
+		_ = conn.Close()
+		return
+	}
+	if h.ConnectionType != model.ConnTypeAgent {
+		s.log.Error("host connection type is not agent", "host_id", hostID, "type", h.ConnectionType)
+		_ = conn.Close()
+		return
+	}
+	if h.AgentToken != agentToken {
+		s.log.Error("agent token mismatch", "host_id", hostID)
+		_ = conn.Close()
+		return
+	}
+	if h.AgentID != "" && h.AgentID != agentID {
+		s.log.Error("agent ID mismatch", "host_id", hostID, "expected", h.AgentID, "got", agentID)
+		_ = conn.Close()
+		return
+	}
+
+	s.log.Info("agent connected", "agent_id", agentID, "host_id", hostID, "user", sess.UserID)
+	s.svc.RegisterAgent(agentID, hostID, conn)
+	// RegisterAgent blocks until the connection closes; no return needed here.
+}
+
 type imageSyncReq struct {
 	SourceHostID string   `json:"source_host_id"`
 	Images       []string `json:"images"`
