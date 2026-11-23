@@ -5,6 +5,32 @@
 
 ## [未发布]
 
+## [v1.1.0-rc.1] - 2025-11-23
+
+首个 Agent 模式候选发布版本：新增 Agent 接入模式，适用于无公网 / NAT 后的内网主机；经真实主机端到端验证（探测 / 创建 / 部署 / 启停 / 备份全链路通过）。
+
+### 新增
+- **Agent 接入模式**：内网主机运行轻量 `1mate-agent` 客户端主动外连平台，无需公网 IP 与 SSH 端口；与 SSH 模式共用同一套 `sshx.Client` 接口，探测 / 部署 / 备份 / 镜像同步等业务逻辑零改动。
+- **双路径连接**：`Service.Connect()` 根据主机 `connection_type` 自动选择 SSH（`sshx.Dialer`）或 Agent（`agentx.Client`）。
+- **机器认证**：Agent 通过高熵 `agent_token` 认证，服务端用 token 反查主机；客户端只需配置 `AGENT_SERVER_URL` + `AGENT_TOKEN`。
+- **前端支持**：主机表单增加连接方式选择（SSH / Agent）、Agent ID / 令牌配置、一次性令牌展示；主机列表显示连接方式；Agent 主机终端 Tab 给出不支持说明。
+- **迁移辅助**：`GET /hosts/{id}/agent-install-command` 生成 Agent 一键安装脚本；`docs/agent-mode.md` 完整接入指南。
+- **协议级测试**：`agent_protocol_test.go` 验证 token 反查、连接注册、命令往返全链路。
+
+### 修复
+- Agent 接入的 5 个阻塞性 bug（任一存在都会导致 Agent 无法工作）：
+  1. `agent/connect` 错误使用 `requireAuth`（Agent 无浏览器会话）→ 改为 token 机器认证；
+  2. 协议不匹配（客户端未传 host_id）→ 服务端用 token 反查主机；
+  3. token 未 URL 编码（`+` `/` `=` 破坏查询参数）→ `url.QueryEscape`；
+  4. Agent 主机无 SSH 凭据违反 `credential_id` 外键 → 占位凭据（`CredAgentToken`）；
+  5. 命令默认超时为 0 导致所有命令立即超时 → 默认 10 分钟。
+
+### 已知限制
+- Agent 模式暂不支持 Web 交互式终端（PTY 未实现），如需交互式操作请用 SSH 模式。
+- Agent 模式大文件传输走 base64，超大镜像建议目标主机本地拉取。
+
+[v1.1.0-rc.1]: https://github.com/staryjie/1mate/releases/tag/v1.1.0-rc.1
+
 ## [v1.0.0] - 2025-11-23
 
 正式发布版本：基于 v1.0.0-rc.1，修复 WebSocket 终端升级失败、镜像同步面板状态不同步、终端断开后空白页等问题；完善 API 文档与开发文档，已在真实 Linux 主机（Debian 13 + fnos）完成完整端到端验证。
