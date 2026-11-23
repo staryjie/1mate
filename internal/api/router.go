@@ -45,6 +45,8 @@ func Router(s *Server, webFS fs.FS, corsAllowed string) http.Handler {
 	api(http.MethodGet, "/api/v1/hosts/{id}/capabilities", s.handleCapabilities, false)
 	api(http.MethodGet, "/api/v1/hosts/{id}/install-script", s.handleInstallScript, false)
 	api(http.MethodPost, "/api/v1/hosts/{id}/actions/install-docker", s.handleInstall, false)
+	// Agent 模式：生成目标主机上的 Agent 一键安装命令。
+	api(http.MethodGet, "/api/v1/hosts/{id}/agent-install-command", s.handleAgentInstallCommand, false)
 
 	// 镜像预检与主机间同步。
 	api(http.MethodPost, "/api/v1/hosts/{id}/images/precheck", s.handleImagePrecheck, false)

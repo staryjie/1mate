@@ -3,11 +3,14 @@
 //
 // 环境变量：
 //   AGENT_SERVER_URL   WebSocket 服务器地址，如 ws://127.0.0.1:8080/api/v1/agent/connect
-//   AGENT_TOKEN        Agent 认证令牌（与主机记录绑定）
-//   AGENT_HOST_ID      主机唯一标识 UUID
+//   AGENT_TOKEN        Agent 认证令牌（与主机记录绑定，必填）
+//   AGENT_HOST_ID      主机标识（可选，仅用于日志显示）
 //   AGENT_INTERVAL     心跳间隔（秒），默认 30
 //   AGENT_RETRY_BASE   重连基础延迟（秒），默认 5
 //   AGENT_RETRY_MAX    最大重连延迟（秒），默认 120
+//
+// 接入只需配置 AGENT_SERVER_URL 与 AGENT_TOKEN：服务端通过 token 反查主机，
+// 不再依赖客户端上报 host_id / agent_id。
 package main
 
 import (
@@ -66,10 +69,8 @@ func loadConfig() (*Config, error) {
 	if token == "" {
 		return nil, fmt.Errorf("AGENT_TOKEN is required")
 	}
+	// AGENT_HOST_ID 现在可选：仅用于日志显示，不参与认证与路由。
 	hostID := os.Getenv("AGENT_HOST_ID")
-	if hostID == "" {
-		return nil, fmt.Errorf("AGENT_HOST_ID is required")
-	}
 
 	heartbeat := 30 * time.Second
 	if v := os.Getenv("AGENT_INTERVAL"); v != "" {

@@ -570,6 +570,27 @@ func (s *Server) installPayload(id string, req installReq) service.InstallPayloa
 	}
 }
 
+// handleAgentInstallCommand 生成 Agent 模式主机的一键安装命令。
+// server_base_url 可选；缺省时根据请求 Host 头推导。
+func (s *Server) handleAgentInstallCommand(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	base := r.URL.Query().Get("server_base_url")
+	if base == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		base = scheme + "://" + r.Host
+	}
+	script, err := s.svc.AgentInstallCommand(id, base)
+	if err != nil {
+		s.failFrom(w, err)
+		return
+	}
+	s.audit.Log(s.actor(r), "host.agent_install_command", "host", id, nil, r)
+	writeJSON(w, http.StatusOK, map[string]any{"script": script, "server_base_url": base})
+}
+
 func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	req := installReq{
