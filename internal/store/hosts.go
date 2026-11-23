@@ -45,6 +45,16 @@ func (s *Store) GetHost(id string) (*model.Host, error) {
 	return s.scanHost(s.db.QueryRow(`SELECT `+hostColumns+` FROM hosts WHERE id = ?`, id))
 }
 
+// FindHostByAgentToken looks up an Agent-managed host by its pre-shared token.
+// Agent tokens are high-entropy random values and uniquely identify a host,
+// so they double as machine credentials for the Agent WebSocket endpoint.
+func (s *Store) FindHostByAgentToken(token string) (*model.Host, error) {
+	if token == "" {
+		return nil, ErrNotFound
+	}
+	return s.scanHost(s.db.QueryRow(`SELECT `+hostColumns+` FROM hosts WHERE agent_token = ? AND connection_type = ?`, token, model.ConnTypeAgent))
+}
+
 func (s *Store) ListHosts() ([]model.Host, error) {
 	rows, err := s.db.Query(`SELECT ` + hostColumns + ` FROM hosts ORDER BY name`)
 	if err != nil {

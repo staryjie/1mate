@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -99,17 +100,17 @@ func loadConfig() (*Config, error) {
 	}, nil
 }
 
-func connectWS(url, token, hostID string) (*websocket.Conn, error) {
-	// 构造带查询参数的 URL：?agent_token=...&agent_id=...
+func connectWS(serverURL, token string) (*websocket.Conn, error) {
+	// 用 net/url 安全地编码 token，避免 base64 中的 + / = 等特殊字符破坏查询参数。
 	sep := "?"
-	if strings.Contains(url, "?") {
+	if strings.Contains(serverURL, "?") {
 		sep = "&"
 	}
-	fullURL := fmt.Sprintf("%s%sagent_token=%s&agent_id=%s", url, sep, token, hostID)
+	fullURL := fmt.Sprintf("%s%sagent_token=%s", serverURL, sep, url.QueryEscape(token))
 
 	dialer := websocket.DefaultDialer
 	headers := http.Header{}
-	headers.Set("Origin", url)
+	headers.Set("Origin", serverURL)
 	conn, _, err := dialer.Dial(fullURL, headers)
 	if err != nil {
 		return nil, fmt.Errorf("dial websocket: %w", err)
@@ -184,8 +185,8 @@ func run(cfg *Config) error {
 	retryDelay := cfg.RetryBase
 
 	for {
-		log.Printf("connecting to %s (host=%s)...", cfg.ServerURL, cfg.HostID)
-		conn, err := connectWS(cfg.ServerURL, cfg.Token, cfg.HostID)
+		log.Printf("connecting to %s...", cfg.ServerURL)
+		conn, err := connectWS(cfg.ServerURL, cfg.Token)
 		if err != nil {
 			log.Printf("connect failed: %v, retry in %v", err, retryDelay)
 			time.Sleep(retryDelay)

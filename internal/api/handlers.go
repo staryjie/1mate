@@ -454,59 +454,36 @@ func (s *Server) handleHostTerminal(w http.ResponseWriter, r *http.Request) {
 // ---- Agent 连接 (WebSocket) ----
 
 // handleAgentConnect upgrades the connection to a WebSocket and registers the
-// Agent client with the AgentHub. The agent authenticates via its agent_token
-// query parameter; the user authenticates via session cookie.
+// Agent client with the AgentHub.
+//
+// Agent 是独立进程，没有浏览器登录会话，因此这里不使用 requireAuth，而是用
+// agent_token 做机器认证：token 是高熵随机值，与主机一一绑定，足以证明身份。
+// 客户端只需配置 AGENT_TOKEN 即可接入，无需关心 host_id / agent_id。
 func (s *Server) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
-	// Authenticate the user via session cookie.
-	sess, err := s.auth.Authenticate(r)
-	if err != nil {
-		s.log.Error("agent websocket auth failed", "error", err)
-		http.Error(w, "authentication required", http.StatusUnauthorized)
+	agentToken := r.URL.Query().Get("agent_token")
+	if agentToken == "" {
+		s.log.Error("agent websocket missing token")
+		http.Error(w, "agent_token is required", http.StatusBadRequest)
 		return
 	}
-	_ = sess
 
-	agentID := r.URL.Query().Get("agent_id")
-	agentToken := r.URL.Query().Get("agent_token")
-	hostID := r.URL.Query().Get("host_id")
-
-	if agentID == "" || agentToken == "" || hostID == "" {
-		s.log.Error("agent websocket missing parameters", "agent_id", agentID, "host_id", hostID)
-		http.Error(w, "agent_id, agent_token and host_id are required", http.StatusBadRequest)
+	// 通过 token 反查主机，同时完成认证与主机定位。
+	h, err := s.store.FindHostByAgentToken(agentToken)
+	if err != nil {
+		s.log.Error("agent token not recognized", "error", err)
+		http.Error(w, "invalid agent_token", http.StatusUnauthorized)
 		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		s.log.Error("agent websocket upgrade failed", "agent_id", agentID, "error", err)
+		s.log.Error("agent websocket upgrade failed", "agent_id", h.AgentID, "error", err)
 		return
 	}
 
-	// Validate agent_token against the host record.
-	h, err := s.store.GetHost(hostID)
-	if err != nil {
-		s.log.Error("agent host not found", "host_id", hostID, "error", err)
-		_ = conn.Close()
-		return
-	}
-	if h.ConnectionType != model.ConnTypeAgent {
-		s.log.Error("host connection type is not agent", "host_id", hostID, "type", h.ConnectionType)
-		_ = conn.Close()
-		return
-	}
-	if h.AgentToken != agentToken {
-		s.log.Error("agent token mismatch", "host_id", hostID)
-		_ = conn.Close()
-		return
-	}
-	if h.AgentID != "" && h.AgentID != agentID {
-		s.log.Error("agent ID mismatch", "host_id", hostID, "expected", h.AgentID, "got", agentID)
-		_ = conn.Close()
-		return
-	}
-
-	s.log.Info("agent connected", "agent_id", agentID, "host_id", hostID, "user", sess.UserID)
-	s.svc.RegisterAgent(agentID, hostID, conn)
+	// 用主机记录里的 AgentID 注册，命令路由（agentx.New(h.AgentID)）依赖该值。
+	s.log.Info("agent connected", "agent_id", h.AgentID, "host_id", h.ID)
+	s.svc.RegisterAgent(h.AgentID, h.ID, conn)
 	// RegisterAgent blocks until the connection closes; no return needed here.
 }
 

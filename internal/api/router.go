@@ -53,8 +53,9 @@ func Router(s *Server, webFS fs.FS, corsAllowed string) http.Handler {
 	// 主机终端 (WebSocket)。
 	mux.Handle("GET /api/v1/hosts/{id}/terminal", s.requireAuth(http.HandlerFunc(s.handleHostTerminal)))
 
-	// Agent 连接 (WebSocket)。
-	mux.Handle("GET /api/v1/agent/connect", s.requireAuth(http.HandlerFunc(s.handleAgentConnect)))
+	// Agent 连接 (WebSocket)。Agent 是独立进程，用 agent_token 做机器认证，
+	// 不经过 requireAuth（浏览器会话认证）；handler 内部通过 token 反查主机。
+	mux.Handle("GET /api/v1/agent/connect", http.HandlerFunc(s.handleAgentConnect))
 
 	// Instances.
 	api(http.MethodGet, "/api/v1/instances", s.handleListInstances, false)
