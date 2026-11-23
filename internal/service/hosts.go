@@ -251,8 +251,30 @@ func (s *Service) createAgentHost(in HostInput) (*model.Host, error) {
 		ConnectionType: model.ConnTypeAgent,
 		AgentToken:     token,
 		AgentID:        agentID,
-		SudoMode:       model.SudoNone,
 		Status:         model.HostUnknown,
+	}
+
+	// G6: Agent 主机同样可能需要 sudo 才能操作 Docker。
+	// 密码存放在普通凭据里，执行时通过 sudo_password 帧字段下发，
+	// 不拼进命令行也不落日志。
+	switch in.SudoMode {
+	case model.SudoNopasswd, model.SudoRoot:
+		h.SudoMode = in.SudoMode
+	case model.SudoPassword:
+		if in.SudoPassword != "" {
+			newID, err := s.storePlainCredential(model.CredSudoPass, in.SudoPassword)
+			if err != nil {
+				_ = s.Store.DeleteCredential(credID)
+				return nil, err
+			}
+			h.SudoCredentialID = newID
+			h.SudoMode = model.SudoPassword
+			s.Red.Add(in.SudoPassword)
+		} else {
+			h.SudoMode = model.SudoNone
+		}
+	default:
+		h.SudoMode = model.SudoNone
 	}
 	if err := s.Store.CreateHost(h); err != nil {
 		_ = s.Store.DeleteCredential(credID)
@@ -468,7 +490,41 @@ func (s *Service) updateAgentHost(h *model.Host, in HostInput) (*model.Host, err
 		h.Address = in.Address
 	}
 	h.ConnectionType = model.ConnTypeAgent
-	h.SudoMode = model.SudoNone
+
+	// 提权模式（G6）：Agent 主机同样可能需要 sudo 才能操作 Docker。
+	// 密码存放在普通凭据里，执行时通过 sudo_password 帧字段下发，
+	// 不拼进命令行也不落日志。
+	switch in.SudoMode {
+	case model.SudoNopasswd, model.SudoRoot:
+		if h.SudoCredentialID != "" {
+			_ = s.Store.DeleteCredential(h.SudoCredentialID)
+		}
+		h.SudoCredentialID = ""
+		h.SudoMode = in.SudoMode
+	case model.SudoPassword:
+		if in.SudoPassword != "" {
+			newID, err := s.storePlainCredential(model.CredSudoPass, in.SudoPassword)
+			if err != nil {
+				return nil, err
+			}
+			old := h.SudoCredentialID
+			h.SudoCredentialID = newID
+			s.Red.Add(in.SudoPassword)
+			if old != "" {
+				_ = s.Store.DeleteCredential(old)
+			}
+		} else if h.SudoCredentialID == "" {
+			return nil, fmt.Errorf("%w: sudo_password is required when sudo_mode is password", ErrValidation)
+		}
+		h.SudoMode = model.SudoPassword
+	default:
+		if h.SudoCredentialID != "" {
+			_ = s.Store.DeleteCredential(h.SudoCredentialID)
+		}
+		h.SudoCredentialID = ""
+		h.SudoMode = model.SudoNone
+	}
+
 	h.Status = model.HostUnknown
 	h.StatusMessage = ""
 	if err := s.Store.UpdateHost(h); err != nil {

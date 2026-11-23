@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -148,9 +149,15 @@ func (s *Service) connectAgent(h *model.Host) (sshx.Client, sshx.Sudo, error) {
 	if !s.agentHub.IsConnected(h.AgentID) {
 		return nil, sshx.Sudo{}, fmt.Errorf("agent %s not connected", h.AgentID)
 	}
+	// 提权策略（G6）：Agent 主机的 sudo 密码同样从凭据解出，稍后通过
+	// sudo_password 帧字段下发，不进入命令行。
+	sudo, err := s.sudoFor(h)
+	if err != nil {
+		return nil, sshx.Sudo{}, err
+	}
 	commander := agentCommander{svc: s}
 	client := agentx.New(h.AgentID, commander)
-	return client, sshx.Sudo{}, nil
+	return client, sudo, nil
 }
 
 // agentCommander adapts Service.SendAgentCommand to the agentx.AgentCommander
@@ -173,6 +180,34 @@ func (a agentCommander) SendCommand(ctx context.Context, agentID string, cmd str
 
 func (a agentCommander) IsConnected(agentID string) bool {
 	return a.svc.AgentConnected(agentID)
+}
+
+// RunStream 通过 Agent 执行命令并回传增量输出（G4）。
+func (a agentCommander) RunStream(ctx context.Context, agentID, cmd string, opts agentx.RunOptions, onOutput func(stream, text string)) (sshx.Result, error) {
+	res, err := a.svc.RunAgentCommand(ctx, agentID, cmd, CommandOptions{
+		Timeout:      opts.Timeout,
+		Stdin:        opts.Stdin,
+		SudoPassword: opts.SudoPassword,
+		OnOutput:     onOutput,
+	})
+	if err != nil {
+		return sshx.Result{}, err
+	}
+	return sshx.Result{
+		ExitCode: res.ExitCode,
+		Stdout:   res.Stdout,
+		Stderr:   res.Stderr,
+	}, nil
+}
+
+// UploadFile 通过 Agent 分块上传文件（G2/G3）。
+func (a agentCommander) UploadFile(ctx context.Context, agentID, path, mode string, r io.Reader) error {
+	return a.svc.UploadToAgent(ctx, agentID, path, mode, r)
+}
+
+// DownloadCommand 通过 Agent 执行命令并把输出流式写入 w（G2/G3）。
+func (a agentCommander) DownloadCommand(ctx context.Context, agentID, cmd string, w io.Writer) (int64, error) {
+	return a.svc.DownloadFromAgent(ctx, agentID, cmd, w)
 }
 
 // dockerPrefix returns the docker command prefix, honouring the case where the
@@ -323,6 +358,39 @@ func (s *Service) SendAgentCommand(ctx context.Context, agentID string, cmd stri
 		return nil, ErrAgentNotConnected
 	}
 	return s.agentHub.SendCommand(ctx, agentID, cmd, timeoutSeconds)
+}
+
+// RunAgentCommand sends a command to an Agent with full options (streaming,
+// stdin, sudo password) and waits for the final result.
+func (s *Service) RunAgentCommand(ctx context.Context, agentID, cmd string, opts CommandOptions) (*AgentResult, error) {
+	if s.agentHub == nil {
+		return nil, ErrAgentNotConnected
+	}
+	return s.agentHub.RunCommand(ctx, agentID, cmd, opts)
+}
+
+// UploadToAgent streams r into a file on the Agent host using chunked frames.
+func (s *Service) UploadToAgent(ctx context.Context, agentID, path, mode string, r io.Reader) error {
+	if s.agentHub == nil {
+		return ErrAgentNotConnected
+	}
+	return s.agentHub.Upload(ctx, agentID, path, mode, r)
+}
+
+// DownloadFromAgent runs cmd on the Agent host and streams its stdout into w.
+func (s *Service) DownloadFromAgent(ctx context.Context, agentID, cmd string, w io.Writer) (int64, error) {
+	if s.agentHub == nil {
+		return 0, ErrAgentNotConnected
+	}
+	return s.agentHub.Download(ctx, agentID, cmd, w)
+}
+
+// AgentVersion returns the version reported by the connected Agent, if any.
+func (s *Service) AgentVersion(agentID string) string {
+	if s.agentHub == nil {
+		return ""
+	}
+	return s.agentHub.AgentVersion(agentID)
 }
 
 // AgentConnected reports whether an Agent is currently connected.

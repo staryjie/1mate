@@ -460,10 +460,19 @@ func (s *Server) handleHostTerminal(w http.ResponseWriter, r *http.Request) {
 // agent_token 做机器认证：token 是高熵随机值，与主机一一绑定，足以证明身份。
 // 客户端只需配置 AGENT_TOKEN 即可接入，无需关心 host_id / agent_id。
 func (s *Server) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
-	agentToken := r.URL.Query().Get("agent_token")
+	// 优先从请求头读取（G7）：URL 会被反向代理、systemd 日志、浏览器历史
+	// 记录，令牌不应出现在 query string 里。query 参数保留兼容旧客户端。
+	agentToken := r.Header.Get("X-Agent-Token")
+	if agentToken == "" {
+		agentToken = r.Header.Get("Authorization")
+		agentToken = strings.TrimPrefix(agentToken, "Bearer ")
+	}
+	if agentToken == "" {
+		agentToken = r.URL.Query().Get("agent_token")
+	}
 	if agentToken == "" {
 		s.log.Error("agent websocket missing token")
-		http.Error(w, "agent_token is required", http.StatusBadRequest)
+		http.Error(w, "agent token is required", http.StatusBadRequest)
 		return
 	}
 
