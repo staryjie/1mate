@@ -152,7 +152,16 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now 1mate
 ```
 
-unit 自带加固（`ProtectSystem=strict`、`NoNewPrivileges`、`ReadWritePaths=/var/lib/1mate` 等），无需修改即可使用。
+unit 自带加固（`ProtectSystem=strict`、`NoNewPrivileges`、`ReadWritePaths=/var/lib/1mate` 等）。
+
+> ⚠️ 实例默认安装在 `/opt/1mate/instances/<slug>`，而 `ProtectSystem=strict` 会将 `/opt` 设为只读。如需部署实例，请将 `/opt/1mate` 加入 `ReadWritePaths`：
+
+```sh
+sudo sed -i 's|ReadWritePaths=/var/lib/1mate|ReadWritePaths=/var/lib/1mate /opt/1mate|' /etc/systemd/system/1mate.service
+sudo systemctl daemon-reload
+sudo systemctl restart 1mate
+```
+
 
 ### 3.5 验证
 
@@ -400,17 +409,51 @@ sudo chown root:root /etc/1mate-agent/agent.env
 sudo chmod 0600 /etc/1mate-agent/agent.env
 ```
 
-3. 安装 systemd 单元并启动（模板见 `deploy/agent.service`）：
+3. 安装 systemd 单元并启动（模板见 `deploy/agent.service`，已内置 `ProtectSystem=true` 与 `ReadWritePaths=/var/lib/1mate-agent /opt/1mate`）：
 
 ```sh
 sudo cp deploy/agent.service /etc/systemd/system/1mate-agent.service
 sudo id -u 1mate >/dev/null 2>&1 || sudo useradd -r -s /usr/sbin/nologin -d /var/lib/1mate-agent 1mate
-sudo chown -R 1mate:1mate /var/lib/1mate-agent
+# Agent 需要在 /opt/1mate/instances 下写入 compose 文件，预创建目录并授权
+sudo mkdir -p /opt/1mate/instances
+sudo chown -R 1mate:1mate /var/lib/1mate-agent /opt/1mate /opt/1mate/instances
 sudo systemctl daemon-reload
 sudo systemctl enable --now 1mate-agent
 ```
 
-### 12.3 Agent 环境变量
+### 12.6 Agent Docker 权限配置（必读）
+
+Agent 以 `1mate` 用户运行，需要访问 Docker 守护进程才能执行 `docker compose`、`docker images`、`docker save/load` 等命令。若不配置权限，Agent 会提示 `permission denied while trying to connect to the Docker daemon socket`。
+
+推荐方式：将 `1mate` 用户加入 `docker` 组：
+
+```sh
+# 在目标主机上以 root 执行
+sudo groupadd -r docker 2>/dev/null || true
+sudo usermod -aG docker 1mate
+id 1mate   # 验证输出包含 (docker)
+
+# 重启 Agent 服务使组成员身份生效
+sudo systemctl restart 1mate-agent
+sudo journalctl -u 1mate-agent -f --no-pager -n 20
+# 日志中应看到 connected to wss://... 且探测正常
+```
+
+备选方式：以 `root` 运行 Agent（仅适用于信任的测试环境）：
+
+```sh
+# 修改服务文件
+sudo sed -i 's/User=1mate/User=root/' /etc/systemd/system/1mate-agent.service
+sudo sed -i 's/Group=1mate/Group=root/' /etc/systemd/system/1mate-agent.service
+sudo chown -R root:root /var/lib/1mate-agent
+sudo systemctl daemon-reload
+sudo systemctl restart 1mate-agent
+```
+
+> ⚠️ 以 root 运行 Agent 拥有完整的主机访问权限，存在 Docker 逃逸和文件系统访问风险，生产环境建议优先使用 `1mate` 用户 + `docker` 组方案。
+
+### 12.7 Agent 环境变量
+
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -436,3 +479,11 @@ sudo journalctl -u 1mate-agent -f
 - Agent 模式下 Web 交互终端（PTY）暂不可用，需要交互式操作请用 SSH 模式。
 - 大文件（如 Docker 镜像）走 base64 编码传输，超大镜像建议目标主机本地拉取。
 - `agent_token` 等同主机凭据，请离线保存、勿提交代码仓库；泄露时在平台编辑主机轮换令牌并同步更新 `agent.env`。
+
+### 12.8 已知问题与修复
+
+| 问题 | 现象 | 修复 |
+|------|------|------|
+| Agent 无法在 `/opt/1mate/instances` 写入 compose 文件 | `mkdir /opt/1mate/instances/xxx: read-only file system` | `deploy/agent.service` 已改为 `ProtectSystem=true` 且 `ReadWritePaths` 包含 `/opt/1mate`；部署时预创建并授权 `/opt/1mate/instances` 给 `1mate` 用户 |
+| 销毁实例时报 `conflict: an operation is in progress for this instance` | 销毁任务失败，退出码 1 | `RunDestroyJob` 直接调用 `Store.DeleteInstance` 绕过 `Service.DeleteInstance` 的活跃任务冲突检查（销毁任务本身已持有实例锁） |
+| Agent 模式访问 URL 显示为 `http://<agent_id>:<port>` | 无法访问，域名无法解析 | 后端不再把 `agent_id` 用作 `Address` 默认值；前端地址为空时显示「未配置主机地址」而非生成错误 URL |

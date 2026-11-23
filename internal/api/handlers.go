@@ -493,6 +493,10 @@ func (s *Server) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
 	// 用主机记录里的 AgentID 注册，命令路由（agentx.New(h.AgentID)）依赖该值。
 	s.log.Info("agent connected", "agent_id", h.AgentID, "host_id", h.ID)
 	s.svc.RegisterAgent(h.AgentID, h.ID, conn)
+
+	// Agent 连接成功后，等待其上报主机 IP，若主机地址为空则自动填充。
+	// 这样前端生成的实例访问 URL 就会使用真实 IP，而不是 agent_id。
+	go s.svc.UpdateHostAddressFromAgent(r.Context(), h.AgentID, h.ID)
 	// RegisterAgent blocks until the connection closes; no return needed here.
 }
 

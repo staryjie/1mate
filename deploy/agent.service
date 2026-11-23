@@ -13,8 +13,8 @@ Restart=always
 RestartSec=5
 EnvironmentFile=-/etc/1mate-agent/agent.env
 # 安全设置
-ProtectSystem=strict
-ReadWritePaths=/var/lib/1mate-agent
+ProtectSystem=true
+ReadWritePaths=/var/lib/1mate-agent /opt/1mate
 NoNewPrivileges=true
 PrivateTmp=true
 

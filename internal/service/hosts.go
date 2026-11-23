@@ -224,9 +224,8 @@ func (s *Service) createAgentHost(in HostInput) (*model.Host, error) {
 	}
 	s.Red.Add(token)
 	address := in.Address
-	if address == "" {
-		address = agentID
-	}
+	// Agent 主机的 address 应为实际可达的 IP/主机名，不应使用 agent_id。
+	// 为空时保持空，前端会在显示访问链接时提示用户配置。
 	// hosts.credential_id 有外键约束 REFERENCES credentials(id)，Agent 主机
 	// 虽不需要 SSH 凭据，仍需一个占位凭据记录满足约束。
 	credID := ids.New()
@@ -610,6 +609,20 @@ func (s *Service) ProbeHost(ctx context.Context, h *model.Host, logf func(string
 	if logf != nil {
 		logf("host %s: status=%s docker=%s compose=%s", h.Name, status, caps.DockerServer, caps.ComposeKind)
 	}
+
+	// 对 Agent 主机，若 address 为空或仍为 agent-id 占位符，尝试从 Agent 上报的 IP 同步真实地址。
+	// 这样在主机详情页点击“重新探测”时，可将空或 agent-xxxx 替换为真实 IP，实例访问 URL 也会随之更新。
+	if h.ConnectionType == model.ConnTypeAgent && (h.Address == "" || strings.HasPrefix(h.Address, "agent-")) {
+		if ip := s.agentHub.AgentIP(h.AgentID); ip != "" {
+			h.Address = ip
+			if err := s.Store.UpdateHost(h); err != nil {
+				s.Log.Warn("failed to sync host address from agent IP during probe", "host_id", h.ID, "ip", ip, "error", err)
+			} else {
+				s.Log.Info("host address synced from agent IP during probe", "host_id", h.ID, "ip", ip)
+			}
+		}
+	}
+
 	return caps, nil
 }
 

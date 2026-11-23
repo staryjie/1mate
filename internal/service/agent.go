@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +46,7 @@ type wireFrame struct {
 	Version string `json:"version,omitempty"`
 	OS      string `json:"os,omitempty"`
 	Arch    string `json:"arch,omitempty"`
+	IP      string `json:"ip,omitempty"`
 
 	// cmd（平台 → Agent）
 	CmdID        string `json:"cmd_id,omitempty"`
@@ -139,6 +141,7 @@ type agentConnection struct {
 	version string
 	osName  string
 	arch    string
+	ip      string
 
 	done chan struct{}
 	once sync.Once
@@ -156,6 +159,17 @@ type AgentHub struct {
 	mu    sync.Mutex
 	conns map[string]*agentConnection
 	log   *slog.Logger
+
+	// onHello 在 Agent 发送 hello 帧（携带 IP、版本、架构）时被调用。
+	// Service 通过此回调将上报的 IP 同步到主机地址字段。
+	onHello func(agentID, ip string)
+}
+
+// SetOnHello 设置 hello 帧回调。
+func (h *AgentHub) SetOnHello(f func(agentID, ip string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.onHello = f
 }
 
 // NewAgentHub creates an AgentHub with no active connections.
@@ -488,9 +502,12 @@ func (h *AgentHub) readLoop(ac *agentConnection) {
 		switch f.Type {
 		case frameHello:
 			ac.mu.Lock()
-			ac.version, ac.osName, ac.arch = f.Version, f.OS, f.Arch
+			ac.version, ac.osName, ac.arch, ac.ip = f.Version, f.OS, f.Arch, f.IP
 			ac.mu.Unlock()
-			h.log.Info("agent hello", "agent_id", ac.agentID, "version", f.Version, "os", f.OS, "arch", f.Arch)
+			h.log.Info("agent hello", "agent_id", ac.agentID, "version", f.Version, "os", f.OS, "arch", f.Arch, "ip", f.IP)
+			if h.onHello != nil {
+				go h.onHello(ac.agentID, f.IP)
+			}
 
 		case frameOut:
 			ac.mu.Lock()
@@ -550,6 +567,51 @@ func (h *AgentHub) AgentVersion(agentID string) string {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	return ac.version
+}
+
+// AgentIP 返回 Agent 客户端上报的主机 IP（未上报时为空）。
+func (h *AgentHub) AgentIP(agentID string) string {
+	ac, err := h.connection(agentID)
+	if err != nil {
+		return ""
+	}
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	return ac.ip
+}
+
+// UpdateHostAddressFromAgent polls for the agent's reported IP and updates
+// the host's address field if it is empty. Runs until IP is reported or ctx
+// is cancelled, up to a 10 second maximum wait.
+func (s *Service) UpdateHostAddressFromAgent(ctx context.Context, agentID, hostID string) {
+	deadline := time.Now().Add(10 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		ip := s.agentHub.AgentIP(agentID)
+		if ip != "" {
+			h, err := s.Store.GetHost(hostID)
+			if err == nil && (h.Address == "" || strings.HasPrefix(h.Address, "agent-")) {
+				h.Address = ip
+				if err := s.Store.UpdateHost(h); err != nil {
+					s.Log.Error("failed to update host address from agent IP", "host_id", hostID, "ip", ip, "error", err)
+				} else {
+					s.Log.Info("host address updated from agent IP", "host_id", hostID, "ip", ip)
+				}
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			s.Log.Warn("agent IP not reported within timeout", "agent_id", agentID, "host_id", hostID)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // ConnectedAgents returns the IDs of all currently connected Agents.

@@ -551,7 +551,14 @@ func (s *Service) RunDestroyJob(ctx context.Context, payload string, logf func(s
 	if logf != nil {
 		logf("removing the instance record")
 	}
-	return s.DeleteInstance(inst.ID)
+	// NOTE: call Store.DeleteInstance directly, not Service.DeleteInstance.
+	// The destroy job already holds the per-instance lock (via job manager's lockFor),
+	// so Service.DeleteInstance's ActiveJobForInstance check would find the destroy
+	// job itself as "in progress" and return a spurious conflict error.
+	if err := s.Store.DeleteInstance(inst.ID); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ProbeInstance health runs a lightweight check used by the background poller.

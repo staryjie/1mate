@@ -252,13 +252,21 @@ export default function InstanceDetailPage() {
                     <Descriptions.Item label="TeslaMate">
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span className="mono">{inst.tm_port}</span>
-                        {tmUrl && <CopyLinkButton url={tmUrl} />}
+                        {tmUrl ? (
+                          <CopyLinkButton url={tmUrl} />
+                        ) : (
+                          <Tag color="warning">未配置主机地址</Tag>
+                        )}
                       </div>
                     </Descriptions.Item>
                     <Descriptions.Item label="Grafana">
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span className="mono">{inst.grafana_port}</span>
-                        {grafanaUrl && <CopyLinkButton url={grafanaUrl} />}
+                        {grafanaUrl ? (
+                          <CopyLinkButton url={grafanaUrl} />
+                        ) : (
+                          <Tag color="warning">未配置主机地址</Tag>
+                        )}
                       </div>
                     </Descriptions.Item>
                     <Descriptions.Item label="MQTT">

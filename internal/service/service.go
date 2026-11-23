@@ -160,6 +160,28 @@ func (s *Service) connectAgent(h *model.Host) (sshx.Client, sshx.Sudo, error) {
 	return client, sudo, nil
 }
 
+// OnAgentHello 是 AgentHub hello 回调：Agent 上报 IP 时，立即同步到主机地址字段。
+// 无论主机地址之前是否为空或 agent-id 占位符，只要 Agent 上报了真实 IP，就更新。
+func (s *Service) OnAgentHello(agentID, ip string) {
+	if ip == "" {
+		return
+	}
+	h, err := s.Store.GetHostByAgentID(agentID)
+	if err != nil {
+		s.Log.Warn("agent hello: host not found by agent ID", "agent_id", agentID, "ip", ip, "error", err)
+		return
+	}
+	if h.Address == ip {
+		return
+	}
+	h.Address = ip
+	if err := s.Store.UpdateHost(h); err != nil {
+		s.Log.Warn("agent hello: failed to update host address", "host_id", h.ID, "agent_id", agentID, "ip", ip, "error", err)
+		return
+	}
+	s.Log.Info("host address synced from agent hello", "host_id", h.ID, "agent_id", agentID, "ip", ip)
+}
+
 // agentCommander adapts Service.SendAgentCommand to the agentx.AgentCommander
 // interface, converting *AgentResult to sshx.Result.
 type agentCommander struct {

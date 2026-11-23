@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -88,6 +89,7 @@ type frame struct {
 	Version string `json:"version,omitempty"`
 	OS      string `json:"os,omitempty"`
 	Arch    string `json:"arch,omitempty"`
+	IP      string `json:"ip,omitempty"`
 
 	CmdID        string `json:"cmd_id,omitempty"`
 	Cmd          string `json:"cmd,omitempty"`
@@ -480,7 +482,9 @@ func (c *conn) uploadEnd(f frame) {
 
 // download 执行命令并把 stdout 分块推给服务器（用于 pg_dump / docker save 等）。
 func (c *conn) download(f frame) {
-	cmd, stdin, err := buildExec(context.Background(), frame{Cmd: f.Cmd, SudoPassword: f.SudoPassword})
+	dlCtx, dlCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer dlCancel()
+	cmd, stdin, err := buildExec(dlCtx, frame{Cmd: f.Cmd, SudoPassword: f.SudoPassword})
 	if err != nil {
 		_ = c.send(frame{Type: frameDownEnd, XferID: f.XferID, ExitCode: -1, Error: err.Error()})
 		return
@@ -569,7 +573,7 @@ func run(cfg *Config) error {
 		ws.SetPingHandler(func(string) error { return nil })
 
 		// 上报版本与平台信息。
-		_ = c.send(frame{Type: frameHello, Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH})
+		_ = c.send(frame{Type: frameHello, Version: version, OS: runtime.GOOS, Arch: runtime.GOARCH, IP: localIP()})
 
 		connDone := make(chan struct{})
 		go func() {
@@ -653,4 +657,68 @@ func main() {
 	if err := run(cfg); err != nil {
 		log.Fatalf("agent exited: %v", err)
 	}
+}
+
+// localIP 返回本机第一个非回环、非 Docker 虚拟网卡的 IPv4 地址，供 hello 帧上报。
+// 剔除 docker0、veth*、br-* 等虚拟网桥，避免上报 172.x.x.x 等容器网段地址。
+func localIP() string {
+	// 优先：通过路由查找到 8.8.8.8 的本地源地址（最可靠）
+	if ip := localIPViaRoute(); ip != "" {
+		return ip
+	}
+	// 兜底：枚举网卡，取第一个非回环非虚拟网卡的 IPv4
+	return localIPViaInterfaces()
+}
+
+// localIPViaRoute 通过向 8.8.8.8 发送 UDP 数据包，获取本机源 IP。
+func localIPViaRoute() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+	if ip := localAddr.IP.To4(); ip != nil && !ip.IsLoopback() {
+		return ip.String()
+	}
+	return ""
+}
+
+// localIPViaInterfaces 枚举网卡，取第一个非回环非 Docker 虚拟网卡的 IPv4。
+func localIPViaInterfaces() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	var candidates []string
+
+	for _, iface := range ifaces {
+		name := iface.Name
+		// 跳过 loopback 接口
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		// 跳过 Docker 虚拟网桥和 veth 对端
+		if name == "docker0" || strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "br-") {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+				if ip4 := ipnet.IP.To4(); ip4 != nil {
+					candidates = append(candidates, ip4.String())
+				}
+			}
+		}
+	}
+
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
 }

@@ -55,6 +55,15 @@ func (s *Store) FindHostByAgentToken(token string) (*model.Host, error) {
 	return s.scanHost(s.db.QueryRow(`SELECT `+hostColumns+` FROM hosts WHERE agent_token = ? AND connection_type = ?`, token, model.ConnTypeAgent))
 }
 
+// GetHostByAgentID looks up an Agent-managed host by its agent ID.
+// Used when Agent reports its IP via hello frame to sync host address.
+func (s *Store) GetHostByAgentID(agentID string) (*model.Host, error) {
+	if agentID == "" {
+		return nil, ErrNotFound
+	}
+	return s.scanHost(s.db.QueryRow(`SELECT `+hostColumns+` FROM hosts WHERE agent_id = ? AND connection_type = ?`, agentID, model.ConnTypeAgent))
+}
+
 func (s *Store) ListHosts() ([]model.Host, error) {
 	rows, err := s.db.Query(`SELECT ` + hostColumns + ` FROM hosts ORDER BY name`)
 	if err != nil {
