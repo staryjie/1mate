@@ -1,0 +1,22 @@
+[Unit]
+Description=1mate Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=1mate
+Group=1mate
+WorkingDirectory=/var/lib/1mate-agent
+ExecStart=/usr/local/bin/1mate-agent
+Restart=always
+RestartSec=5
+EnvironmentFile=-/etc/1mate-agent/agent.env
+# 安全设置
+ProtectSystem=strict
+ReadWritePaths=/var/lib/1mate-agent
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
