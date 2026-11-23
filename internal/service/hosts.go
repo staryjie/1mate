@@ -227,6 +227,19 @@ func (s *Service) createAgentHost(in HostInput) (*model.Host, error) {
 	if address == "" {
 		address = agentID
 	}
+	// hosts.credential_id 有外键约束 REFERENCES credentials(id)，Agent 主机
+	// 虽不需要 SSH 凭据，仍需一个占位凭据记录满足约束。
+	credID := ids.New()
+	if err := s.Store.CreateCredential(&model.Credential{
+		ID:        credID,
+		Kind:      model.CredAgentToken,
+		Ciphertext: "", // Agent token 单独存于 hosts.agent_token
+		KeyVersion: 1,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		return nil, err
+	}
+
 	h := &model.Host{
 		ID:             ids.New(),
 		Name:           in.Name,
@@ -234,6 +247,7 @@ func (s *Service) createAgentHost(in HostInput) (*model.Host, error) {
 		SSHPort:        in.SSHPort,
 		SSHUser:        in.SSHUser,
 		AuthType:       in.AuthType,
+		CredentialID:   credID,
 		ConnectionType: model.ConnTypeAgent,
 		AgentToken:     token,
 		AgentID:        agentID,
@@ -241,6 +255,7 @@ func (s *Service) createAgentHost(in HostInput) (*model.Host, error) {
 		Status:         model.HostUnknown,
 	}
 	if err := s.Store.CreateHost(h); err != nil {
+		_ = s.Store.DeleteCredential(credID)
 		return nil, err
 	}
 	h.AgentTokenSet = true

@@ -28,6 +28,8 @@ const (
 	CredSSHKey      CredentialKind = "ssh_key"
 	CredSSHPassword CredentialKind = "ssh_password"
 	CredSudoPass    CredentialKind = "sudo_password"
+	// CredAgentToken 是 Agent 主机的占位凭据（真实令牌存于 hosts.agent_token）。
+	CredAgentToken CredentialKind = "agent_token"
 )
 
 type Credential struct {
