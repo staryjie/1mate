@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"1mate/internal/agentx"
 	"1mate/internal/cryptox"
@@ -49,9 +50,11 @@ type Service struct {
 }
 
 type ptySession struct {
-	hostID string
-	pty    sshx.PtySession
-	client sshx.Client
+	hostID    string
+	agentID   string   // 空字符串表示 SSH 模式，非空表示 Agent 模式
+	pty       sshx.PtySession
+	client    sshx.Client
+	outputChan chan []byte  // Agent 模式：平台侧读取 PTY 输出
 }
 
 func New(st *store.Store, box *cryptox.Box, red *redact.Redactor, dataDir string, log *slog.Logger, agentHub *AgentHub) *Service {
@@ -290,6 +293,56 @@ func (s *Service) CreatePtySession(hostID, term string, rows, cols int) (string,
 	if err != nil {
 		return "", classifySSHError(err)
 	}
+
+	s.ptyMu.Lock()
+	s.nextPtyID++
+	id := fmt.Sprintf("pty-%d", s.nextPtyID)
+	s.ptyMu.Unlock()
+
+	if h.ConnectionType == model.ConnTypeAgent {
+		// Agent 模式：通过 agentHub 发送 pty_start 帧，等待 Agent 确认。
+		agentID := h.AgentID
+		if agentID == "" {
+			_ = client.Close()
+			return "", fmt.Errorf("agent host %s has no agent_id", hostID)
+		}
+		ptyID := id // 复用 session ID 作为 ptyID
+		if err := s.agentHub.PtyStart(agentID, ptyID, term, rows, cols); err != nil {
+			_ = client.Close()
+			return "", fmt.Errorf("agent pty start: %w", err)
+		}
+		// 等待 Agent 确认 pty_start_ok（最多 10 秒），ptyOutputChans 中会出现对应 channel
+		ac, err := s.agentHub.connection(agentID)
+		if err != nil {
+			_ = client.Close()
+			return "", err
+		}
+		var ch chan []byte
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			ac.mu.Lock()
+			ch = ac.ptyOutputChans[ptyID]
+			ac.mu.Unlock()
+			if ch != nil {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if ch == nil {
+			_ = client.Close()
+			return "", fmt.Errorf("agent pty start timeout")
+		}
+		s.ptyMu.Lock()
+		s.ptySessions[id] = &ptySession{
+			hostID:    hostID,
+			agentID:   agentID,
+			outputChan: ch,
+		}
+		s.ptyMu.Unlock()
+		return id, nil
+	}
+
+	// SSH 模式：直接启动 PTY。
 	pty, err := client.PtyStart(context.Background(), term, rows, cols, sshx.RunOptions{
 		Sudo: sudo,
 	})
@@ -299,8 +352,6 @@ func (s *Service) CreatePtySession(hostID, term string, rows, cols int) (string,
 	}
 	s.ptyMu.Lock()
 	defer s.ptyMu.Unlock()
-	s.nextPtyID++
-	id := fmt.Sprintf("pty-%d", s.nextPtyID)
 	s.ptySessions[id] = &ptySession{hostID: hostID, pty: pty, client: client}
 	return id, nil
 }
@@ -312,6 +363,10 @@ func (s *Service) PtyWrite(sessionID string, data []byte) error {
 	s.ptyMu.Unlock()
 	if !ok {
 		return store.ErrNotFound
+	}
+	if ps.agentID != "" {
+		// Agent 模式：通过 Agent 通道发送 pty_input 帧。
+		return s.agentHub.PtyInput(ps.agentID, sessionID, data)
 	}
 	_, err := ps.pty.Write(data)
 	return err
@@ -326,6 +381,15 @@ func (s *Service) PtyRead(sessionID string, buf []byte) (int, error) {
 	if !ok {
 		return 0, store.ErrNotFound
 	}
+	if ps.agentID != "" {
+		// Agent 模式：从输出 channel 读取 Agent 推送的 pty_out 数据。
+		data, ok := <-ps.outputChan
+		if !ok {
+			return 0, io.EOF
+		}
+		n := copy(buf, data)
+		return n, nil
+	}
 	return ps.pty.Read(buf)
 }
 
@@ -337,10 +401,14 @@ func (s *Service) PtyResize(sessionID string, rows, cols int) error {
 	if !ok {
 		return store.ErrNotFound
 	}
+	if ps.agentID != "" {
+		// Agent 模式：通过 Agent 通道发送 pty_resize 帧。
+		return s.agentHub.PtyResize(ps.agentID, sessionID, rows, cols)
+	}
 	return ps.pty.Resize(rows, cols)
 }
 
-// PtyClose closes a PTY session and releases its SSH connection.
+// PtyClose closes a PTY session and releases its resources.
 func (s *Service) PtyClose(sessionID string) error {
 	s.ptyMu.Lock()
 	ps, ok := s.ptySessions[sessionID]
@@ -350,6 +418,11 @@ func (s *Service) PtyClose(sessionID string) error {
 	s.ptyMu.Unlock()
 	if !ok {
 		return store.ErrNotFound
+	}
+	if ps.agentID != "" {
+		// Agent 模式：向 Agent 发送 pty_close 帧。
+		_ = s.agentHub.PtyClose(ps.agentID, sessionID)
+		return nil
 	}
 	_ = ps.pty.Close()
 	_ = ps.client.Close()

@@ -672,8 +672,11 @@ func (c *conn) ptyInput(f frame) {
 	}
 	log.Printf("[DEBUG] ptyInput: received %d bytes for ptyID=%s", len(data), f.CmdID)
 	// 将 xterm.js 发送的 \r 转换为 \n，供 Unix shell 识别为行结束
-	data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
-	_, _ = sess.stdin.Write(data)
+	input := bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
+	_, _ = sess.stdin.Write(input)
+	// 注意：Agent 模式下没有真 PTY，shell 不会自动回显用户输入。
+	// 此处不主动 echo，避免与 shell 输出错位交错导致字符重复。
+	// 用户将以“盲输入、见输出”的方式使用终端（这是管道模式的固有限制）。
 }
 
 // ptyResize 调整终端窗口大小（管道模式下暂不实际调整，仅记录）。

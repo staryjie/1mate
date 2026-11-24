@@ -33,6 +33,15 @@ const (
 	frameDownChunk = "down_chunk"
 	frameDownEnd   = "down_end"
 	framePong      = "pong"
+
+	// PTY 会话帧（Web 终端，G8，双向）。
+	framePtyStart  = "pty_start"
+	framePtyStartOk = "pty_start_ok"
+	framePtyOut    = "pty_out"
+	framePtyInput  = "pty_input"
+	framePtyResize = "pty_resize"
+	framePtyClose  = "pty_close"
+	framePtyExit   = "pty_exit"
 )
 
 // 传输分块大小：base64 后约 43KB，远低于 128KB 的单参数上限。
@@ -58,6 +67,7 @@ type wireFrame struct {
 	// out（Agent → 平台，流式输出）
 	Stream string `json:"stream,omitempty"` // stdout | stderr
 	Data   string `json:"data,omitempty"`   // 明文增量
+	Term   string `json:"term,omitempty"`   // 终端类型（pty_start）
 
 	// result（Agent → 平台）
 	ExitCode int    `json:"exit_code,omitempty"`
@@ -138,6 +148,9 @@ type agentConnection struct {
 	cmds map[string]*cmdWaiter
 	xfer map[string]*xferWaiter
 
+	// PTY 输出通道（G8）：ptyID -> 输出 channel，供平台侧 PtyRead 读取。
+	ptyOutputChans map[string]chan []byte
+
 	version string
 	osName  string
 	arch    string
@@ -199,6 +212,7 @@ func (h *AgentHub) Register(agentID, hostID string, conn agentConn) {
 		hostID:  hostID,
 		cmds:    make(map[string]*cmdWaiter),
 		xfer:    make(map[string]*xferWaiter),
+		ptyOutputChans: make(map[string]chan []byte),
 		done:    make(chan struct{}),
 	}
 	h.conns[agentID] = ac
@@ -530,6 +544,20 @@ func (h *AgentHub) readLoop(ac *agentConnection) {
 			default:
 			}
 
+		case framePtyStartOk:
+			ac.ptyStartOk(f.CmdID)
+
+		case framePtyExit:
+			ac.ptyExit(f.CmdID)
+
+		case framePtyOut:
+			data, decodeErr := base64.StdEncoding.DecodeString(f.Data)
+			if decodeErr != nil {
+				h.log.Error("agent pty_out base64 decode failed", "agent_id", ac.agentID, "error", decodeErr)
+				continue
+			}
+			ac.ptyOutput(f.CmdID, data)
+
 		case frameUpAck, frameUpDone, frameUpError, frameDownChunk, frameDownEnd:
 			ac.mu.Lock()
 			xw := ac.xfer[f.XferID]
@@ -578,6 +606,93 @@ func (h *AgentHub) AgentIP(agentID string) string {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	return ac.ip
+}
+
+// ---------- PTY 会话管理（G8，Agent 模式 Web 终端） ----------
+
+// PtyStart 向 Agent 发送 pty_start 帧，请求在指定 agent 上启动 PTY 会话。
+func (h *AgentHub) PtyStart(agentID, ptyID, term string, rows, cols int) error {
+	ac, err := h.connection(agentID)
+	if err != nil {
+		return err
+	}
+	return ac.send(wireFrame{
+		Type:   framePtyStart,
+		CmdID:  ptyID,
+		Term:   term,
+		Data:   fmt.Sprintf("%d,%d", rows, cols),
+	})
+}
+
+// PtyInput 把用户输入（base64 解码后的字节）发送到 Agent 侧 PTY 的 stdin。
+func (h *AgentHub) PtyInput(agentID, ptyID string, data []byte) error {
+	ac, err := h.connection(agentID)
+	if err != nil {
+		return err
+	}
+	return ac.send(wireFrame{
+		Type: framePtyInput,
+		CmdID: ptyID,
+		Data: base64.StdEncoding.EncodeToString(data),
+	})
+}
+
+// PtyResize 向 Agent 发送 pty_resize 帧，调整 PTY 窗口大小。
+func (h *AgentHub) PtyResize(agentID, ptyID string, rows, cols int) error {
+	ac, err := h.connection(agentID)
+	if err != nil {
+		return err
+	}
+	return ac.send(wireFrame{
+		Type:   framePtyResize,
+		CmdID:  ptyID,
+		Data:   fmt.Sprintf("%d,%d", rows, cols),
+	})
+}
+
+// PtyClose 向 Agent 发送 pty_close 帧，关闭 PTY 会话。
+func (h *AgentHub) PtyClose(agentID, ptyID string) error {
+	ac, err := h.connection(agentID)
+	if err != nil {
+		return err
+	}
+	return ac.send(wireFrame{
+		Type: framePtyClose,
+		CmdID: ptyID,
+	})
+}
+
+// ptyOutput 由 readLoop 在收到 pty_out 帧时调用，将输出数据推入对应 channel，
+// 供平台侧 PtyRead 读取。
+func (ac *agentConnection) ptyOutput(ptyID string, data []byte) {
+	ac.mu.Lock()
+	ch, ok := ac.ptyOutputChans[ptyID]
+	ac.mu.Unlock()
+	if ok {
+		select {
+		case ch <- data:
+		default:
+			// channel 满时丢弃，避免阻塞 readLoop
+		}
+	}
+}
+
+// ptyStartOk 记录 PTY 会话已在 Agent 侧启动，创建输出 channel。
+func (ac *agentConnection) ptyStartOk(ptyID string) {
+	ac.mu.Lock()
+	ac.ptyOutputChans[ptyID] = make(chan []byte, 256)
+	ac.mu.Unlock()
+}
+
+// ptyExit 移除 PTY 会话及其输出 channel。
+func (ac *agentConnection) ptyExit(ptyID string) {
+	ac.mu.Lock()
+	ch := ac.ptyOutputChans[ptyID]
+	delete(ac.ptyOutputChans, ptyID)
+	ac.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
 }
 
 // UpdateHostAddressFromAgent polls for the agent's reported IP and updates

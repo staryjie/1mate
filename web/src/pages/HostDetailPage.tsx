@@ -315,10 +315,15 @@ export default function HostDetailPage() {
             children:
               host.connection_type === 'agent' ? (
                 <Alert
+                  message="Agent 模式暂不支持 Web 终端"
+                  description={
+                    <div>
+                      Agent 端未实现真 PTY（伪终端），Web 终端无法正常交互。{' '}
+                      <a href="/instances/new">请使用 SSH 模式主机</a> 的 Web 终端功能，或等待后续版本支持 Agent 模式 PTY。
+                    </div>
+                  }
                   type="info"
                   showIcon
-                  message="Agent 模式暂不支持 Web 终端"
-                  description="Agent 客户端通过非交互式命令通道执行运维操作，交互式 PTY 通道尚未实现。如需交互式终端，请改用 SSH 连接方式。"
                 />
               ) : (
                 <Terminal hostId={host.id} />
