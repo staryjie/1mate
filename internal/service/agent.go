@@ -156,6 +156,9 @@ type agentConnection struct {
 	arch    string
 	ip      string
 
+	// G11：最后一次收到 Agent 帧的时间，用于判定连接是否新鲜（未半开）。
+	lastSeen time.Time
+
 	done chan struct{}
 	once sync.Once
 }
@@ -214,6 +217,7 @@ func (h *AgentHub) Register(agentID, hostID string, conn agentConn) {
 		xfer:    make(map[string]*xferWaiter),
 		ptyOutputChans: make(map[string]chan []byte),
 		done:    make(chan struct{}),
+		lastSeen: time.Now(),
 	}
 	h.conns[agentID] = ac
 
@@ -506,6 +510,10 @@ func (h *AgentHub) readLoop(ac *agentConnection) {
 			h.log.Debug("agent read loop exiting", "agent_id", ac.agentID, "error", err)
 			return
 		}
+		// G11：每收到一帧都刷新 lastSeen，用于半开连接检测。
+		ac.mu.Lock()
+		ac.lastSeen = time.Now()
+		ac.mu.Unlock()
 
 		var f wireFrame
 		if err := json.Unmarshal(msg, &f); err != nil {
@@ -746,4 +754,32 @@ func (h *AgentHub) IsConnected(agentID string) bool {
 	defer h.mu.Unlock()
 	_, ok := h.conns[agentID]
 	return ok
+}
+
+// LastSeen returns the last time a frame was received from the Agent.
+// Zero value if not connected.
+func (h *AgentHub) LastSeen(agentID string) time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ac, ok := h.conns[agentID]
+	if !ok {
+		return time.Time{}
+	}
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	return ac.lastSeen
+}
+
+// IsConnectedFresh reports whether the Agent is connected AND has sent a frame
+// within maxAge. Use this to detect half-open (stale) connections.
+func (h *AgentHub) IsConnectedFresh(agentID string, maxAge time.Duration) bool {
+	h.mu.Lock()
+	ac, ok := h.conns[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return false
+	}
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	return time.Since(ac.lastSeen) <= maxAge
 }

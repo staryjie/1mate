@@ -18,7 +18,7 @@
 | G8 | PTY / Web 终端未实现（Agent 主机显示“暂不支持”警告） | P2 | 已部分修复 |
 | G9 | 无 Agent 版本上报，平台看不到客户端版本，升级需手工替换 | P2 | 已修复 |
 | G10 | 无 TLS 自定义（自签证书的 wss:// 连不上，不能配 CA） | P2 | 待修复 |
-| G11 | 服务端读循环无读超时/pong 处理，半开连接被误判为在线 | P2 | 待修复 |
+| G11 | 服务端读循环无读超时/pong 处理，半开连接被误判为在线 | P2 | 已修复 |
 | G12 | Agent 端无命令白名单/审计，收到即执行 | P2 | 设计取舍（文档已警告） |
 | G13 | 无系统指标上报（CPU/内存/磁盘） | P3 | 待修复 |
 
@@ -136,13 +136,16 @@
 
 ---
 
-## G11 — 半开连接误判在线
+## G11 — 半开连接误判在线（已修复）
 
 **证据**：服务端 `readLoop` 只阻塞在 `ReadMessage`，未设置 read deadline，也未注册 pong 处理。
 
 **影响**：网络静默中断（拔网线、NAT 超时）时 `IsConnected` 长时间返回 true，任务会先超时才报错。
 
-**修复方案**：设置 `SetReadDeadline` + `SetPongHandler`，Agent 定期 Ping。
+**修复**：
+- Agent 端：心跳帧改为 `websocket.PingMessage`（原 `framePong` 语义错误），`SetPongHandler` + `SetReadDeadline(pongWait=90s)`，`AGENT_INTERVAL` 不得超过 `pongWait`，否则读取超时会误触发重连。
+- 服务端：`agentConnection` 增加 `lastSeen` 字段，每帧更新；新增 `LastSeen()` 和 `IsConnectedFresh(agentID, maxAge)` 方法；`handleAgentConnect` 设置 WebSocket 读超时和 pong 处理器；`handleListHosts` / `handleGetHost` 返回 `last_seen` 字段。
+- 前端：`Host` 类型增加 `last_seen`；HostsPage 新增「连接新鲜度」列，Agent 主机显示已连接/可能已断开/未上报。
 
 ---
 

@@ -93,6 +93,8 @@ export interface Host {
   agent_token_set?: boolean
   capabilities?: Capabilities
   instance_count?: number
+  // G11：Agent 最后一次收到帧的时间，用于判定连接是否新鲜（非半开）。
+  last_seen?: string
 }
 
 export interface Instance {

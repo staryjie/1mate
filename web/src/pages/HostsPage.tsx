@@ -242,6 +242,21 @@ export default function HostsPage() {
                 ? `${r.capabilities.compose_kind}${r.capabilities.compose_version ? ` ${r.capabilities.compose_version}` : ''}`
                 : '—',
           },
+          {
+            title: '连接新鲜度',
+            width: 140,
+            render: (_, r) => {
+              if (r.connection_type !== 'agent') return '—'
+              if (!r.last_seen) return <Tag color="orange">未上报</Tag>
+              const last = new Date(r.last_seen).getTime()
+              const now = Date.now()
+              const staleMs = 90 * 1000
+              if (now - last > staleMs) {
+                return <Tag color="warning">可能已断开</Tag>
+              }
+              return <Tag color="success">已连接</Tag>
+            },
+          },
           { title: 'sudo', dataIndex: 'sudo_mode' },
           { title: '实例数', dataIndex: 'instance_count', width: 90 },
           { title: '最近探测', render: (_, r) => daysAgo(r.last_probe_at) },

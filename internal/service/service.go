@@ -495,3 +495,12 @@ func (s *Service) AgentConnected(agentID string) bool {
 	}
 	return s.agentHub.IsConnected(agentID)
 }
+
+// AgentHubLastSeen returns the last time a frame was received from the Agent.
+// Zero value if not connected.
+func (s *Service) AgentHubLastSeen(agentID string) time.Time {
+	if s.agentHub == nil {
+		return time.Time{}
+	}
+	return s.agentHub.LastSeen(agentID)
+}

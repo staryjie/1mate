@@ -218,6 +218,8 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		model.Host
 		Capabilities *model.Capabilities `json:"capabilities,omitempty"`
 		Instances    int                 `json:"instance_count"`
+		// G11：Agent 最后一次收到帧的时间，用于前端判定连接是否新鲜（非半开）。
+		LastSeen string `json:"last_seen,omitempty"`
 	}
 	out := make([]hostView, 0, len(hosts))
 	for i := range hosts {
@@ -227,6 +229,12 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		}
 		if n, err := s.store.CountInstancesForHost(hosts[i].ID); err == nil {
 			v.Instances = n
+		}
+		// G11：Agent 主机填充最后活跃时间，前端据此判定连接是否新鲜。
+		if hosts[i].ConnectionType == model.ConnTypeAgent {
+			if lastSeen := s.svc.AgentHubLastSeen(hosts[i].AgentID); !lastSeen.IsZero() {
+				v.LastSeen = lastSeen.Format(time.RFC3339)
+			}
 		}
 		out = append(out, v)
 	}
@@ -265,6 +273,12 @@ func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"host": h}
 	if caps, err := s.store.GetCapabilities(id); err == nil {
 		resp["capabilities"] = caps
+	}
+	// G11：Agent 主机填充最后活跃时间。
+	if h.ConnectionType == model.ConnTypeAgent {
+		if lastSeen := s.svc.AgentHubLastSeen(h.AgentID); !lastSeen.IsZero() {
+			resp["last_seen"] = lastSeen.Format(time.RFC3339)
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -489,6 +503,15 @@ func (s *Server) handleAgentConnect(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("agent websocket upgrade failed", "agent_id", h.AgentID, "error", err)
 		return
 	}
+
+	// G11：设置 WebSocket 读取超时和 pong 处理器，若 Agent 长期无响应
+	// 则连接会自动断开，服务端 readLoop 退出并从 AgentHub 移除。
+	const pongWait = 90 * time.Second
+	conn.SetPongHandler(func(appData string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+	conn.SetReadDeadline(time.Now().Add(pongWait))
 
 	// 用主机记录里的 AgentID 注册，命令路由（agentx.New(h.AgentID)）依赖该值。
 	s.log.Info("agent connected", "agent_id", h.AgentID, "host_id", h.ID)

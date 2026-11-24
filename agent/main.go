@@ -133,6 +133,14 @@ type Config struct {
 	RetryMax  time.Duration
 }
 
+// WebSocket 连接活跃度阈值（G11：半开连接检测）。
+// pongWait 是等待 pong 响应的最长时间；若超过此时间未收到 pong，
+// 读取会超时并触发重连。应大于 pingPeriod。
+const (
+	pongWait   = 90 * time.Second
+	pingPeriod = 30 * time.Second
+)
+
 func loadConfig() (*Config, error) {
 	serverURL := os.Getenv("AGENT_SERVER_URL")
 	if serverURL == "" {
@@ -150,6 +158,10 @@ func loadConfig() (*Config, error) {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			heartbeat = time.Duration(n) * time.Second
 		}
+	}
+	// G11：pingPeriod 不应超过 pongWait，否则读取超时会误触发重连。
+	if heartbeat > pongWait {
+		heartbeat = pongWait
 	}
 	retryBase := 5 * time.Second
 	if v := os.Getenv("AGENT_RETRY_BASE"); v != "" {
@@ -761,6 +773,12 @@ func run(cfg *Config) error {
 
 		heartbeatTicker := time.NewTicker(cfg.Heartbeat)
 		stopped := false
+		// G11：设置读取超时和 pong 处理器，若半开连接长期无响应则自动断开并重连。
+		ws.SetPongHandler(func(appData string) error {
+			ws.SetReadDeadline(time.Now().Add(pongWait))
+			return nil
+		})
+		ws.SetReadDeadline(time.Now().Add(pongWait))
 		for !stopped {
 			select {
 			case <-interrupt:
@@ -772,7 +790,8 @@ func run(cfg *Config) error {
 				c.close()
 				stopped = true
 			case <-heartbeatTicker.C:
-				if serr := c.send(frame{Type: framePong}); serr != nil {
+				if serr := c.ws.WriteMessage(websocket.PingMessage, nil); serr != nil {
+					log.Printf("websocket ping failed: %v", serr)
 					c.close()
 					stopped = true
 				}
