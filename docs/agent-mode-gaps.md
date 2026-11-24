@@ -17,7 +17,7 @@
 | G7 | agent_token 走 URL query，会被反代访问日志记录 | P1 | 已修复 |
 | G8 | PTY / Web 终端未实现（Agent 主机显示“暂不支持”警告） | P2 | 已部分修复 |
 | G9 | 无 Agent 版本上报，平台看不到客户端版本，升级需手工替换 | P2 | 已修复 |
-| G10 | 无 TLS 自定义（自签证书的 wss:// 连不上，不能配 CA） | P2 | 待修复 |
+| G10 | 无 TLS 自定义（自签证书的 wss:// 连不上，不能配 CA） | P2 | 已修复 |
 | G11 | 服务端读循环无读超时/pong 处理，半开连接被误判为在线 | P2 | 已修复 |
 | G12 | Agent 端无命令白名单/审计，收到即执行 | P2 | 设计取舍（文档已警告） |
 | G13 | 无系统指标上报（CPU/内存/磁盘） | P3 | 待修复 |
@@ -126,13 +126,21 @@
 
 ---
 
-## G10 — 无 TLS 自定义
+## G10 — 无 TLS 自定义（已修复）
 
-**证据**：`connectWS` 用 `websocket.DefaultDialer`。
+**证据（修复前）**：`connectWS` 用 `websocket.DefaultDialer`，不支持 `wss://`。
 
-**影响**：平台使用自签证书时 `wss://` 直接失败，无法配置 CA 或跳过校验。
+**影响（修复前）**：平台使用自签证书时 `wss://` 直接失败，无法配置 CA 或跳过校验。
 
-**修复方案**：新增 `AGENT_CA_FILE` / `AGENT_INSECURE_SKIP_VERIFY`，构造自定义 `tls.Config`。
+**修复**：
+- `Config` 新增 `CACertFile` / `InsecureSkipVerify` 字段（`agent/main.go`）。
+- `loadConfig` 读取环境变量 `AGENT_CA_FILE`、`AGENT_INSECURE_SKIP_VERIFY`。
+- `connectWS(cfg *Config)`：`wss://` 时构建自定义 `tls.Config`（`InsecureSkipVerify`、`MinVersion TLS1.2`，`AGENT_CA_FILE` 非空则加载 PEM 到 `RootCAs`）；`ws://` 连接时 `tlsConfig` 为 nil。
+- 使用自定义 `websocket.Dialer`（`TLSClientConfig=tlsConfig`）。
+
+**环境变量**：
+- `AGENT_CA_FILE`：自定义 CA 证书 PEM 文件路径，用于 `wss://` 连接的服务器证书验证。
+- `AGENT_INSECURE_SKIP_VERIFY`：`true`/`1` 时跳过服务器证书验证（仅用于测试/自签名证书，生产环境不建议开启）。
 
 ---
 

@@ -31,6 +31,8 @@ package main
 import (
 	"context"
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -125,12 +127,14 @@ type frame struct {
 
 // Config 从环境变量读取的 Agent 配置。
 type Config struct {
-	ServerURL string
-	Token     string
-	HostID    string
-	Heartbeat time.Duration
-	RetryBase time.Duration
-	RetryMax  time.Duration
+	ServerURL       string
+	Token           string
+	HostID          string
+	Heartbeat       time.Duration
+	RetryBase       time.Duration
+	RetryMax        time.Duration
+	CACertFile      string // G10：自定义 CA 证书文件路径，用于 wss:// 连接的服务器证书验证
+	InsecureSkipVerify bool   // G10：跳过服务器证书验证（仅用于测试/自签名证书，生产环境不建议开启）
 }
 
 // WebSocket 连接活跃度阈值（G11：半开连接检测）。
@@ -175,21 +179,32 @@ func loadConfig() (*Config, error) {
 			retryMax = time.Duration(n) * time.Second
 		}
 	}
+	// G10：TLS 配置
+	caCertFile := os.Getenv("AGENT_CA_FILE")
+	insecureSkipVerify := false
+	if v := os.Getenv("AGENT_INSECURE_SKIP_VERIFY"); v != "" {
+		insecureSkipVerify = strings.EqualFold(v, "true") || v == "1"
+	}
 
 	return &Config{
-		ServerURL: serverURL,
-		Token:     token,
-		HostID:    hostID,
-		Heartbeat: heartbeat,
-		RetryBase: retryBase,
-		RetryMax:  retryMax,
+		ServerURL:         serverURL,
+		Token:             token,
+		HostID:            hostID,
+		Heartbeat:         heartbeat,
+		RetryBase:         retryBase,
+		RetryMax:          retryMax,
+		CACertFile:        caCertFile,
+		InsecureSkipVerify: insecureSkipVerify,
 	}, nil
 }
 
 // connectWS 建立与服务器的 WebSocket 连接。令牌通过 X-Agent-Token 请求头
 // 发送（G7）：URL 里不再出现令牌，避免被反向代理访问日志记录。
-func connectWS(serverURL, token string) (*websocket.Conn, error) {
-	u, err := url.Parse(serverURL)
+//
+// G10：支持 wss://。通过 AGENT_CA_FILE 指定自定义 CA 证书，或通过
+// AGENT_INSECURE_SKIP_VERIFY=true 跳过服务器证书验证（不建议用于生产）。
+func connectWS(cfg *Config) (*websocket.Conn, error) {
+	u, err := url.Parse(cfg.ServerURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid server url: %w", err)
 	}
@@ -197,10 +212,36 @@ func connectWS(serverURL, token string) (*websocket.Conn, error) {
 		u.Scheme = "ws"
 	}
 
+	// G10：构建 TLS 配置（仅 wss:// 需要；ws:// 连接时 tlsConfig 为 nil）。
+	var tlsConfig *tls.Config
+	if u.Scheme == "wss" {
+		tlsConfig = &tls.Config{
+			InsecureSkipVerify: cfg.InsecureSkipVerify,
+			MinVersion:         tls.VersionTLS12,
+		}
+		if cfg.CACertFile != "" {
+			caCert, err := os.ReadFile(cfg.CACertFile)
+			if err != nil {
+				return nil, fmt.Errorf("read CA cert file %q: %w", cfg.CACertFile, err)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				return nil, fmt.Errorf("failed to append CA cert from %q", cfg.CACertFile)
+			}
+			tlsConfig.RootCAs = caPool
+		}
+	}
+
 	dialer := websocket.DefaultDialer
+	if tlsConfig != nil {
+		dialer = &websocket.Dialer{
+			TLSClientConfig: tlsConfig,
+			HandshakeTimeout: websocket.DefaultDialer.HandshakeTimeout,
+		}
+	}
 	headers := http.Header{}
-	headers.Set("X-Agent-Token", token)
-	headers.Set("Origin", serverURL)
+	headers.Set("X-Agent-Token", cfg.Token)
+	headers.Set("Origin", cfg.ServerURL)
 
 	conn, _, err := dialer.Dial(u.String(), headers)
 	if err != nil {
@@ -721,7 +762,7 @@ func run(cfg *Config) error {
 
 	for {
 		log.Printf("connecting to %s ...", cfg.ServerURL)
-		ws, err := connectWS(cfg.ServerURL, cfg.Token)
+		ws, err := connectWS(cfg)
 		if err != nil {
 			log.Printf("connect failed: %v, retry in %v", err, retryDelay)
 			select {
