@@ -30,6 +30,7 @@ package main
 
 import (
 	"context"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,15 @@ const (
 	frameDownChunk = "down_chunk"
 	frameDownEnd   = "down_end"
 	framePong      = "pong"
+
+	// PTY 会话帧（Web 终端，G8）。
+	framePtyStart  = "pty_start"
+	framePtyStartOk = "pty_start_ok"
+	framePtyOut    = "pty_out"
+	framePtyInput  = "pty_input"
+	framePtyResize = "pty_resize"
+	framePtyClose  = "pty_close"
+	framePtyExit   = "pty_exit"
 )
 
 // 单帧 base64 载荷与 result 帧的保留上限。
@@ -99,6 +109,7 @@ type frame struct {
 
 	Stream string `json:"stream,omitempty"`
 	Data   string `json:"data,omitempty"`
+	Term   string `json:"term,omitempty"`   // 终端类型（pty_start）
 
 	ExitCode int    `json:"exit_code,omitempty"`
 	Stdout   string `json:"stdout,omitempty"`
@@ -194,14 +205,26 @@ type conn struct {
 	once   sync.Once
 
 	mu      sync.Mutex
+	sendMu  sync.Mutex
 	active  map[string]context.CancelFunc
 	uploads map[string]*uploadSession
+	ptys    map[string]*ptySession
 }
 
 type uploadSession struct {
 	path string
 	mode string
 	file *os.File
+}
+
+// ptySession 管理 Agent 侧启动的交互式 shell 进程（Web 终端，G8）。
+type ptySession struct {
+	id        string
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.Reader
+	done      chan struct{}
+	closeOnce sync.Once // 防止 close(sess.done) 被重复调用导致 panic
 }
 
 func newConn(ws *websocket.Conn) *conn {
@@ -211,6 +234,7 @@ func newConn(ws *websocket.Conn) *conn {
 		closed:  make(chan struct{}),
 		active:  make(map[string]context.CancelFunc),
 		uploads: make(map[string]*uploadSession),
+		ptys:    make(map[string]*ptySession),
 	}
 	// 单写者：closing out 之后不再写。
 	go c.writeLoop()
@@ -231,21 +255,25 @@ func (c *conn) writeLoop() {
 // send 把一个帧排入写队列。队列满或连接关闭时立即返回错误，避免阻塞
 // 命令执行线程（尤其在大文件传输时）。
 func (c *conn) send(f frame) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
 	select {
-	case c.out <- f:
-		return nil
 	case <-c.closed:
 		return errors.New("connection closed")
+	case c.out <- f:
+		return nil
 	}
 }
 
 // close 关闭连接（幂等）。
 func (c *conn) close() {
+	c.sendMu.Lock()
 	c.once.Do(func() {
 		close(c.closed)
 		close(c.out)
 		_ = c.ws.Close()
 	})
+	c.sendMu.Unlock()
 }
 
 // cancel 中止指定命令。
@@ -274,6 +302,14 @@ func (c *conn) handle(f frame) {
 		c.uploadEnd(f)
 	case frameDownBegin:
 		go c.download(f)
+	case framePtyStart:
+		go c.ptyStart(f)
+	case framePtyInput:
+		c.ptyInput(f)
+	case framePtyResize:
+		c.ptyResize(f)
+	case framePtyClose:
+		c.ptyClose(f)
 	default:
 		log.Printf("unknown frame type: %s", f.Type)
 	}
@@ -540,7 +576,128 @@ func (c *conn) download(f frame) {
 	_ = c.send(end)
 }
 
-// run 是 Agent 客户端主循环：连接、读取帧、心跳、重连。
+// ptyStart 在 Agent 侧启动一个交互式 shell 进程，并把 stdin/stdout 桥接到
+// WebSocket 帧（G8 Agent 模式 Web 终端）。
+func (c *conn) ptyStart(f frame) {
+	ptyID := f.CmdID
+	if ptyID == "" {
+		ptyID = fmt.Sprintf("pty-%d", time.Now().UnixNano())
+	}
+	term := f.Term
+	if term == "" {
+		term = "xterm-256color"
+	}
+
+	cmd := exec.Command("sh")
+	// 使用管道而非真 PTY，避免跨平台复杂性；bash 的交互式回显在管道模式下
+	// 仍可正常工作（读取一行，执行，输出结果）。
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
+		return
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
+		return
+	}
+	cmd.Stderr = cmd.Stdout // 合并 stderr 到 stdout，简化帧处理
+
+	if err := cmd.Start(); err != nil {
+		log.Printf("[DEBUG] ptyStart: cmd.Start failed: %v", err)
+		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
+		return
+	}
+	log.Printf("[DEBUG] ptyStart: shell started, pid=%d, ptyID=%s", cmd.Process.Pid, ptyID)
+
+	sess := &ptySession{
+		id:     ptyID,
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: stdout,
+		done:   make(chan struct{}),
+	}
+	c.mu.Lock()
+	c.ptys[ptyID] = sess
+	c.mu.Unlock()
+
+	// 输出泵：从 shell  stdout 读取，通过 pty_out 帧推送给平台。
+	go func() {
+		defer func() { sess.closeOnce.Do(func() { close(sess.done) }) }()
+		buf := make([]byte, chunkPayloadSize)
+		for {
+			n, rerr := stdout.Read(buf)
+			if n > 0 {
+				log.Printf("[DEBUG] outputPump: read %d bytes, sending pty_out for ptyID=%s", n, ptyID)
+				if serr := c.send(frame{
+					Type:   framePtyOut,
+					CmdID:  ptyID,
+					Data:   base64.StdEncoding.EncodeToString(buf[:n]),
+				}); serr != nil {
+					log.Printf("[DEBUG] outputPump: send failed: %v", serr)
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	// 进程退出时通知平台。
+	go func() {
+		_ = cmd.Wait()
+		c.mu.Lock()
+		delete(c.ptys, ptyID)
+		c.mu.Unlock()
+		sess.closeOnce.Do(func() { close(sess.done) })
+		_ = c.send(frame{Type: framePtyExit, CmdID: ptyID, ExitCode: 0})
+	}()
+
+	_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID})
+}
+
+// ptyInput 把前端发来的用户输入写入 shell stdin。
+func (c *conn) ptyInput(f frame) {
+	c.mu.Lock()
+	sess, ok := c.ptys[f.CmdID]
+	c.mu.Unlock()
+	if !ok {
+		return
+	}
+	data, err := base64.StdEncoding.DecodeString(f.Data)
+	if err != nil {
+		log.Printf("[DEBUG] ptyInput: base64 decode failed: %v", err)
+		return
+	}
+	log.Printf("[DEBUG] ptyInput: received %d bytes for ptyID=%s", len(data), f.CmdID)
+	// 将 xterm.js 发送的 \r 转换为 \n，供 Unix shell 识别为行结束
+	data = bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
+	_, _ = sess.stdin.Write(data)
+}
+
+// ptyResize 调整终端窗口大小（管道模式下暂不实际调整，仅记录）。
+func (c *conn) ptyResize(f frame) {
+	// 管道模式下不支持真正的窗口大小调整；保留帧处理以备后续 PTY 升级。
+}
+
+// ptyClose 关闭 PTY 会话。
+func (c *conn) ptyClose(f frame) {
+	c.mu.Lock()
+	sess, ok := c.ptys[f.CmdID]
+	if ok {
+		delete(c.ptys, f.CmdID)
+	}
+	c.mu.Unlock()
+	if !ok {
+		return
+	}
+	_ = sess.stdin.Close()
+	_ = sess.cmd.Process.Kill()
+	<-sess.done
+}
+
+// term 字段已在 wireFrame 中复用，这里不需要新增。
 func run(cfg *Config) error {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
