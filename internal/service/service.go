@@ -504,3 +504,12 @@ func (s *Service) AgentHubLastSeen(agentID string) time.Time {
 	}
 	return s.agentHub.LastSeen(agentID)
 }
+
+// AgentHubAgentMetrics returns the latest system metrics JSON reported by the Agent.
+// Empty string if not connected or no metrics received yet.
+func (s *Service) AgentHubAgentMetrics(agentID string) string {
+	if s.agentHub == nil {
+		return ""
+	}
+	return s.agentHub.AgentMetrics(agentID)
+}

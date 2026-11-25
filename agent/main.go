@@ -51,7 +51,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -86,6 +85,9 @@ const (
 	framePtyResize = "pty_resize"
 	framePtyClose  = "pty_close"
 	framePtyExit   = "pty_exit"
+
+	// G13：系统指标上报帧。
+	frameMetrics   = "metrics"
 )
 
 // 单帧 base64 载荷与 result 帧的保留上限。
@@ -94,7 +96,116 @@ const (
 	resultKeepLimit  = 8 << 20 // 8MB
 )
 
-// frame 是 Agent 通道上的统一帧格式。
+// G13：系统指标。
+type systemMetrics struct {
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemPercent  float64 `json:"mem_percent"`
+	DiskPercent float64 `json:"disk_percent"`
+	Load1       float64 `json:"load1"`
+}
+
+// cpuStat 记录上次 /proc/stat 采样，用于计算 CPU 使用率。
+type cpuStat struct {
+	lastTotal  uint64
+	lastIdle   uint64
+	initialized bool
+}
+
+var cpuSample cpuStat
+
+// collectMetrics 收集系统指标（CPU/内存/磁盘/负载）。
+// CPU 使用率需要两次采样，首次返回 0。
+func collectMetrics() systemMetrics {
+	m := systemMetrics{}
+
+	// CPU 使用率
+	if total, idle, err := readProcStat(); err == nil {
+		if cpuSample.initialized {
+			deltaTotal := total - cpuSample.lastTotal
+			deltaIdle := idle - cpuSample.lastIdle
+			if deltaTotal > 0 {
+				m.CPUPercent = float64(deltaTotal-deltaIdle) / float64(deltaTotal) * 100.0
+			}
+		}
+		cpuSample.lastTotal = total
+		cpuSample.lastIdle = idle
+		cpuSample.initialized = true
+	}
+
+	// 内存使用率
+	if mem := readProcMeminfo(); mem > 0 {
+		m.MemPercent = mem
+	}
+
+	// 磁盘使用率（根分区）
+	if disk := readDiskUsage("/"); disk >= 0 {
+		m.DiskPercent = disk
+	}
+
+	// 1 分钟负载
+	if load := readLoadavg(); load >= 0 {
+		m.Load1 = load
+	}
+
+	return m
+}
+
+// readProcStat 从 /proc/stat 读取 CPU 总时间和空闲时间。
+func readProcStat() (total, idle uint64, err error) {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, 0, err
+	}
+	// 第一行：cpu  user nice system idle iowait irq softirq steal guest guest_nice
+	var (
+		cpuLabel string
+		user, nice, system, iowait, irq, softirq, steal, guest, guestNice uint64
+	)
+	if _, err := fmt.Sscanf(string(data), "%s %d %d %d %d %d %d %d %d %d %d",
+		&cpuLabel, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal, &guest, &guestNice); err != nil {
+		return 0, 0, err
+	}
+	if cpuLabel != "cpu" {
+		return 0, 0, fmt.Errorf("unexpected /proc/stat first line: %s", cpuLabel)
+	}
+	total = user + nice + system + idle + iowait + irq + softirq + steal
+	idleAll := idle + iowait
+	return total, idleAll, nil
+}
+
+// readProcMeminfo 从 /proc/meminfo 读取内存使用率。
+func readProcMeminfo() float64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	var memTotal, memAvail uint64
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			fmt.Sscanf(line, "MemTotal: %d kB", &memTotal)
+		} else if strings.HasPrefix(line, "MemAvailable:") {
+			fmt.Sscanf(line, "MemAvailable: %d kB", &memAvail)
+		}
+	}
+	if memTotal == 0 {
+		return 0
+	}
+	return float64(memTotal-memAvail) / float64(memTotal) * 100.0
+}
+
+
+// readLoadavg 从 /proc/loadavg 读取 1 分钟负载。
+func readLoadavg() float64 {
+	data, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return -1
+	}
+	var load1 float64
+	if _, err := fmt.Sscanf(string(data), "%f", &load1); err != nil {
+		return -1
+	}
+	return load1
+}
 type frame struct {
 	Type string `json:"type"`
 
@@ -123,6 +234,9 @@ type frame struct {
 	Mode   string `json:"mode,omitempty"`
 	Seq    int    `json:"seq,omitempty"`
 	B64    string `json:"b64,omitempty"`
+
+	// G13：系统指标（metrics 帧）。
+	Metrics string `json:"metrics,omitempty"`
 }
 
 // Config 从环境变量读取的 Agent 配置。
@@ -135,6 +249,26 @@ type Config struct {
 	RetryMax        time.Duration
 	CACertFile      string // G10：自定义 CA 证书文件路径，用于 wss:// 连接的服务器证书验证
 	InsecureSkipVerify bool   // G10：跳过服务器证书验证（仅用于测试/自签名证书，生产环境不建议开启）
+	AllowCmds       []string // G12：命令白名单（逗号分隔，支持前缀匹配；为空表示允许所有命令）
+}
+
+// isCmdAllowed 判断命令是否在白名单内。白名单为空时允许所有命令。
+// 支持前缀匹配：白名单项 "docker compose" 会允许 "docker compose up -d"。
+func (c *Config) isCmdAllowed(cmd string) bool {
+	if len(c.AllowCmds) == 0 {
+		return true
+	}
+	cmd = strings.TrimSpace(cmd)
+	for _, allowed := range c.AllowCmds {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if strings.HasPrefix(cmd, allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 // WebSocket 连接活跃度阈值（G11：半开连接检测）。
@@ -186,6 +320,17 @@ func loadConfig() (*Config, error) {
 		insecureSkipVerify = strings.EqualFold(v, "true") || v == "1"
 	}
 
+	// G12：命令白名单（逗号分隔，支持前缀匹配；为空表示允许所有命令）。
+	allowCmds := []string{}
+	if v := os.Getenv("AGENT_ALLOW_CMDS"); v != "" {
+		for _, raw := range strings.Split(v, ",") {
+			cmd := strings.TrimSpace(raw)
+			if cmd != "" {
+				allowCmds = append(allowCmds, cmd)
+			}
+		}
+	}
+
 	return &Config{
 		ServerURL:         serverURL,
 		Token:             token,
@@ -195,6 +340,7 @@ func loadConfig() (*Config, error) {
 		RetryMax:          retryMax,
 		CACertFile:        caCertFile,
 		InsecureSkipVerify: insecureSkipVerify,
+		AllowCmds:         allowCmds,
 	}, nil
 }
 
@@ -256,6 +402,7 @@ type conn struct {
 	out    chan frame
 	closed chan struct{}
 	once   sync.Once
+	cfg    *Config // G12：连接关联的配置（含命令白名单）
 
 	mu      sync.Mutex
 	sendMu  sync.Mutex
@@ -280,7 +427,7 @@ type ptySession struct {
 	closeOnce sync.Once // 防止 close(sess.done) 被重复调用导致 panic
 }
 
-func newConn(ws *websocket.Conn) *conn {
+func newConn(ws *websocket.Conn, cfg *Config) *conn {
 	c := &conn{
 		ws:      ws,
 		out:     make(chan frame, 256),
@@ -288,6 +435,7 @@ func newConn(ws *websocket.Conn) *conn {
 		active:  make(map[string]context.CancelFunc),
 		uploads: make(map[string]*uploadSession),
 		ptys:    make(map[string]*ptySession),
+		cfg:     cfg,
 	}
 	// 单写者：closing out 之后不再写。
 	go c.writeLoop()
@@ -379,6 +527,12 @@ func (c *conn) runCommand(f frame) {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
 	defer cancel()
+
+	// G12：命令白名单检查。空白名单表示允许所有命令（保持向后兼容）。
+	if !c.cfg.isCmdAllowed(f.Cmd) {
+		_ = c.send(frame{Type: frameResult, CmdID: f.CmdID, ExitCode: -1, Error: "command not allowed by whitelist"})
+		return
+	}
 
 	c.mu.Lock()
 	c.active[f.CmdID] = cancel
@@ -756,7 +910,7 @@ func (c *conn) ptyClose(f frame) {
 // term 字段已在 wireFrame 中复用，这里不需要新增。
 func run(cfg *Config) error {
 	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(interrupt, os.Interrupt)
 
 	retryDelay := cfg.RetryBase
 
@@ -779,7 +933,7 @@ func run(cfg *Config) error {
 		retryDelay = cfg.RetryBase
 		log.Printf("connected to %s (version=%s)", cfg.ServerURL, version)
 
-		c := newConn(ws)
+		c := newConn(ws, cfg)
 
 		// 服务器的 ping 由我们自己应答应用层 pong 帧；这里禁用 gorilla 的
 		// 自动 pong，避免它在非写者 goroutine 里直接写 WS 破坏帧序。
@@ -831,8 +985,17 @@ func run(cfg *Config) error {
 				c.close()
 				stopped = true
 			case <-heartbeatTicker.C:
+				// G11：发送 websocket Ping 用于半开连接检测。
 				if serr := c.ws.WriteMessage(websocket.PingMessage, nil); serr != nil {
 					log.Printf("websocket ping failed: %v", serr)
+					c.close()
+					stopped = true
+				}
+				// G13：上报系统指标（CPU/内存/磁盘/负载）。
+				metrics := collectMetrics()
+				metricsJSON, _ := json.Marshal(metrics)
+				if serr := c.send(frame{Type: frameMetrics, Metrics: string(metricsJSON)}); serr != nil {
+					log.Printf("websocket metrics send failed: %v", serr)
 					c.close()
 					stopped = true
 				}

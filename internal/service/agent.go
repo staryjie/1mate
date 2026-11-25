@@ -42,6 +42,9 @@ const (
 	framePtyResize = "pty_resize"
 	framePtyClose  = "pty_close"
 	framePtyExit   = "pty_exit"
+
+	// G13：系统指标上报帧。
+	frameMetrics   = "metrics"
 )
 
 // 传输分块大小：base64 后约 43KB，远低于 128KB 的单参数上限。
@@ -81,6 +84,9 @@ type wireFrame struct {
 	Mode   string `json:"mode,omitempty"`
 	Seq    int    `json:"seq,omitempty"`
 	B64    string `json:"b64,omitempty"`
+
+	// G13：系统指标（metrics 帧）。
+	Metrics string `json:"metrics,omitempty"`
 }
 
 // AgentResult is the agent→server command result.
@@ -155,6 +161,7 @@ type agentConnection struct {
 	osName  string
 	arch    string
 	ip      string
+	metrics string // G13：最新系统指标 JSON
 
 	// G11：最后一次收到 Agent 帧的时间，用于判定连接是否新鲜（未半开）。
 	lastSeen time.Time
@@ -566,6 +573,11 @@ func (h *AgentHub) readLoop(ac *agentConnection) {
 			}
 			ac.ptyOutput(f.CmdID, data)
 
+		case frameMetrics:
+			ac.mu.Lock()
+			ac.metrics = f.Metrics
+			ac.mu.Unlock()
+
 		case frameUpAck, frameUpDone, frameUpError, frameDownChunk, frameDownEnd:
 			ac.mu.Lock()
 			xw := ac.xfer[f.XferID]
@@ -782,4 +794,18 @@ func (h *AgentHub) IsConnectedFresh(agentID string, maxAge time.Duration) bool {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	return time.Since(ac.lastSeen) <= maxAge
+}
+
+// AgentMetrics returns the latest system metrics JSON reported by the Agent.
+// Empty string if not connected or no metrics received yet.
+func (h *AgentHub) AgentMetrics(agentID string) string {
+	h.mu.Lock()
+	ac, ok := h.conns[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	return ac.metrics
 }
