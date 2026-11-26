@@ -53,6 +53,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
 
@@ -112,6 +113,12 @@ type cpuStat struct {
 }
 
 var cpuSample cpuStat
+
+// readDiskUsage 返回指定路径所在文件系统的磁盘使用率（百分比）。
+// 返回 -1 表示无法获取。
+func readDiskUsage(path string) float64 {
+	return -1
+}
 
 // collectMetrics 收集系统指标（CPU/内存/磁盘/负载）。
 // CPU 使用率需要两次采样，首次返回 0。
@@ -223,6 +230,8 @@ type frame struct {
 	Stream string `json:"stream,omitempty"`
 	Data   string `json:"data,omitempty"`
 	Term   string `json:"term,omitempty"`   // 终端类型（pty_start）
+	Rows   int    `json:"rows,omitempty"`   // PTY 窗口行数（pty_resize）
+	Cols   int    `json:"cols,omitempty"`   // PTY 窗口列数（pty_resize）
 
 	ExitCode int    `json:"exit_code,omitempty"`
 	Stdout   string `json:"stdout,omitempty"`
@@ -419,11 +428,10 @@ type uploadSession struct {
 
 // ptySession 管理 Agent 侧启动的交互式 shell 进程（Web 终端，G8）。
 type ptySession struct {
-	id        string
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.Reader
-	done      chan struct{}
+	id       string
+	cmd      *exec.Cmd
+	ptyFile  *os.File  // PTY 主端，可读写
+	done     chan struct{}
 	closeOnce sync.Once // 防止 close(sess.done) 被重复调用导致 panic
 }
 
@@ -796,44 +804,31 @@ func (c *conn) ptyStart(f frame) {
 	}
 
 	cmd := exec.Command("sh")
-	// 使用管道而非真 PTY，避免跨平台复杂性；bash 的交互式回显在管道模式下
-	// 仍可正常工作（读取一行，执行，输出结果）。
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
-		return
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
-		return
-	}
-	cmd.Stderr = cmd.Stdout // 合并 stderr 到 stdout，简化帧处理
 
-	if err := cmd.Start(); err != nil {
-		log.Printf("[DEBUG] ptyStart: cmd.Start failed: %v", err)
+	ptyFile, err := pty.Start(cmd)
+	if err != nil {
+		log.Printf("[DEBUG] ptyStart: pty.Start failed: %v", err)
 		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
 		return
 	}
-	log.Printf("[DEBUG] ptyStart: shell started, pid=%d, ptyID=%s", cmd.Process.Pid, ptyID)
+	log.Printf("[DEBUG] ptyStart: shell started with PTY, pid=%d, ptyID=%s", cmd.Process.Pid, ptyID)
 
 	sess := &ptySession{
-		id:     ptyID,
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: stdout,
-		done:   make(chan struct{}),
+		id:      ptyID,
+		cmd:     cmd,
+		ptyFile: ptyFile,
+		done:    make(chan struct{}),
 	}
 	c.mu.Lock()
 	c.ptys[ptyID] = sess
 	c.mu.Unlock()
 
-	// 输出泵：从 shell  stdout 读取，通过 pty_out 帧推送给平台。
+	// 输出泵：从 PTY 主端读取，通过 pty_out 帧推送给平台。
 	go func() {
 		defer func() { sess.closeOnce.Do(func() { close(sess.done) }) }()
 		buf := make([]byte, chunkPayloadSize)
 		for {
-			n, rerr := stdout.Read(buf)
+			n, rerr := ptyFile.Read(buf)
 			if n > 0 {
 				log.Printf("[DEBUG] outputPump: read %d bytes, sending pty_out for ptyID=%s", n, ptyID)
 				if serr := c.send(frame{
@@ -857,14 +852,14 @@ func (c *conn) ptyStart(f frame) {
 		c.mu.Lock()
 		delete(c.ptys, ptyID)
 		c.mu.Unlock()
-		sess.closeOnce.Do(func() { close(sess.done) })
-		_ = c.send(frame{Type: framePtyExit, CmdID: ptyID, ExitCode: 0})
+		_ = c.send(frame{Type: framePtyExit, CmdID: ptyID})
 	}()
 
+	log.Printf("[DEBUG] ptyStart: sending pty_start_ok for ptyID=%s", ptyID)
 	_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID})
 }
 
-// ptyInput 把前端发来的用户输入写入 shell stdin。
+// ptyInput 把前端发来的用户输入写入 shell stdin（通过 PTY 主端）。
 func (c *conn) ptyInput(f frame) {
 	c.mu.Lock()
 	sess, ok := c.ptys[f.CmdID]
@@ -880,15 +875,23 @@ func (c *conn) ptyInput(f frame) {
 	log.Printf("[DEBUG] ptyInput: received %d bytes for ptyID=%s", len(data), f.CmdID)
 	// 将 xterm.js 发送的 \r 转换为 \n，供 Unix shell 识别为行结束
 	input := bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
-	_, _ = sess.stdin.Write(input)
-	// 注意：Agent 模式下没有真 PTY，shell 不会自动回显用户输入。
-	// 此处不主动 echo，避免与 shell 输出错位交错导致字符重复。
-	// 用户将以“盲输入、见输出”的方式使用终端（这是管道模式的固有限制）。
+	_, _ = sess.ptyFile.Write(input)
 }
 
-// ptyResize 调整终端窗口大小（管道模式下暂不实际调整，仅记录）。
+// ptyResize 调整终端窗口大小。
 func (c *conn) ptyResize(f frame) {
-	// 管道模式下不支持真正的窗口大小调整；保留帧处理以备后续 PTY 升级。
+	c.mu.Lock()
+	sess, ok := c.ptys[f.CmdID]
+	c.mu.Unlock()
+	if !ok {
+		return
+	}
+	if err := pty.Setsize(sess.ptyFile, &pty.Winsize{
+		Rows: uint16(f.Rows),
+		Cols: uint16(f.Cols),
+	}); err != nil {
+		log.Printf("[DEBUG] ptyResize: failed: %v", err)
+	}
 }
 
 // ptyClose 关闭 PTY 会话。
@@ -902,7 +905,7 @@ func (c *conn) ptyClose(f frame) {
 	if !ok {
 		return
 	}
-	_ = sess.stdin.Close()
+	_ = sess.ptyFile.Close()
 	_ = sess.cmd.Process.Kill()
 	<-sess.done
 }

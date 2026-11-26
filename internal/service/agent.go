@@ -186,6 +186,11 @@ type AgentHub struct {
 	// onHello 在 Agent 发送 hello 帧（携带 IP、版本、架构）时被调用。
 	// Service 通过此回调将上报的 IP 同步到主机地址字段。
 	onHello func(agentID, ip string)
+
+	// ptyReady 在 pty_start_ok 收到时关闭，供 CreatePtySession 等待（G8）。
+	// hub-level 状态避免连接切换（Agent 重连）导致信号丢失。
+	ptyReadyMu sync.Mutex
+	ptyReady   map[string]chan struct{}
 }
 
 // SetOnHello 设置 hello 帧回调。
@@ -201,7 +206,8 @@ func NewAgentHub(log *slog.Logger) *AgentHub {
 		log = slog.Default()
 	}
 	return &AgentHub{
-		conns: make(map[string]*agentConnection),
+		conns:   make(map[string]*agentConnection),
+		ptyReady: make(map[string]chan struct{}),
 		log:   log,
 	}
 }
@@ -561,6 +567,13 @@ func (h *AgentHub) readLoop(ac *agentConnection) {
 
 		case framePtyStartOk:
 			ac.ptyStartOk(f.CmdID)
+			// G8：hub-level 信号，即使连接随后切换也不会丢失
+			h.ptyReadyMu.Lock()
+			if ch, ok := h.ptyReady[f.CmdID]; ok {
+				close(ch)
+				delete(h.ptyReady, f.CmdID)
+			}
+			h.ptyReadyMu.Unlock()
 
 		case framePtyExit:
 			ac.ptyExit(f.CmdID)

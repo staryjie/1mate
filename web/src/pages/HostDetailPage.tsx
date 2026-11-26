@@ -312,22 +312,7 @@ export default function HostDetailPage() {
           {
             key: 'terminal',
             label: '终端',
-            children:
-              host.connection_type === 'agent' ? (
-                <Alert
-                  message="Agent 模式暂不支持 Web 终端"
-                  description={
-                    <div>
-                      Agent 端未实现真 PTY（伪终端），Web 终端无法正常交互。{' '}
-                      <a href="/instances/new">请使用 SSH 模式主机</a> 的 Web 终端功能，或等待后续版本支持 Agent 模式 PTY。
-                    </div>
-                  }
-                  type="info"
-                  showIcon
-                />
-              ) : (
-                <Terminal hostId={host.id} />
-              ),
+            children: <Terminal hostId={host.id} />,
           },
           {
             key: 'info',
