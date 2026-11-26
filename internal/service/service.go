@@ -307,31 +307,56 @@ func (s *Service) CreatePtySession(hostID, term string, rows, cols int) (string,
 			return "", fmt.Errorf("agent host %s has no agent_id", hostID)
 		}
 		ptyID := id // 复用 session ID 作为 ptyID
-		if err := s.agentHub.PtyStart(agentID, ptyID, term, rows, cols); err != nil {
-			_ = client.Close()
-			return "", fmt.Errorf("agent pty start: %w", err)
-		}
-		// 等待 Agent 确认 pty_start_ok（最多 10 秒），ptyOutputChans 中会出现对应 channel
+
+		// 取得连接，后续发送与等待均复用同一个 agentConnection，避免连接切换导致信号丢失。
 		ac, err := s.agentHub.connection(agentID)
 		if err != nil {
 			_ = client.Close()
 			return "", err
 		}
-		var ch chan []byte
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			ac.mu.Lock()
-			ch = ac.ptyOutputChans[ptyID]
-			ac.mu.Unlock()
-			if ch != nil {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
+
+		// hub-level 就绪信号：pty_start_ok 收到时关闭
+		ready := make(chan struct{})
+		s.agentHub.ptyReadyMu.Lock()
+		s.agentHub.ptyReady[ptyID] = ready
+		s.agentHub.ptyReadyMu.Unlock()
+		defer func() {
+			s.agentHub.ptyReadyMu.Lock()
+			delete(s.agentHub.ptyReady, ptyID)
+			s.agentHub.ptyReadyMu.Unlock()
+		}()
+
+		// 直接在当前连接上发送 pty_start（不走 PtyStart，避免二次 connection() 竞态）
+		s.Log.Debug("agent pty_start sending", "agent_id", agentID, "pty_id", ptyID, "rows", rows, "cols", cols)
+		if err := ac.send(wireFrame{
+			Type:   framePtyStart,
+			CmdID:  ptyID,
+			Term:   term,
+			Data:   fmt.Sprintf("%d,%d", rows, cols),
+		}); err != nil {
+			_ = client.Close()
+			return "", fmt.Errorf("agent pty start: %w", err)
 		}
-		if ch == nil {
+
+		// 等待 Agent 确认 pty_start_ok（最多 10 秒）
+		select {
+		case <-ready:
+			s.Log.Debug("agent pty_start_ok received", "agent_id", agentID, "pty_id", ptyID)
+		case <-time.After(10 * time.Second):
+			s.Log.Error("agent pty start timeout", "agent_id", agentID, "pty_id", ptyID)
 			_ = client.Close()
 			return "", fmt.Errorf("agent pty start timeout")
 		}
+
+		// 从当前连接取出输出通道
+		ac.mu.Lock()
+		ch := ac.ptyOutputChans[ptyID]
+		ac.mu.Unlock()
+		if ch == nil {
+			_ = client.Close()
+			return "", fmt.Errorf("agent pty start: no output channel")
+		}
+
 		s.ptyMu.Lock()
 		s.ptySessions[id] = &ptySession{
 			hostID:    hostID,
@@ -503,4 +528,13 @@ func (s *Service) AgentHubLastSeen(agentID string) time.Time {
 		return time.Time{}
 	}
 	return s.agentHub.LastSeen(agentID)
+}
+
+// AgentHubAgentMetrics returns the latest system metrics JSON reported by the Agent.
+// Empty string if not connected or no metrics received yet.
+func (s *Service) AgentHubAgentMetrics(agentID string) string {
+	if s.agentHub == nil {
+		return ""
+	}
+	return s.agentHub.AgentMetrics(agentID)
 }

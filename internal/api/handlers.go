@@ -220,6 +220,8 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		Instances    int                 `json:"instance_count"`
 		// G11：Agent 最后一次收到帧的时间，用于前端判定连接是否新鲜（非半开）。
 		LastSeen string `json:"last_seen,omitempty"`
+		// G13：Agent 上报的系统指标 JSON（CPU/内存/磁盘/负载）。
+		Metrics string `json:"metrics,omitempty"`
 	}
 	out := make([]hostView, 0, len(hosts))
 	for i := range hosts {
@@ -234,6 +236,10 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		if hosts[i].ConnectionType == model.ConnTypeAgent {
 			if lastSeen := s.svc.AgentHubLastSeen(hosts[i].AgentID); !lastSeen.IsZero() {
 				v.LastSeen = lastSeen.Format(time.RFC3339)
+			}
+			// G13：Agent 主机填充系统指标。
+			if metrics := s.svc.AgentHubAgentMetrics(hosts[i].AgentID); metrics != "" {
+				v.Metrics = metrics
 			}
 		}
 		out = append(out, v)
@@ -278,6 +284,10 @@ func (s *Server) handleGetHost(w http.ResponseWriter, r *http.Request) {
 	if h.ConnectionType == model.ConnTypeAgent {
 		if lastSeen := s.svc.AgentHubLastSeen(h.AgentID); !lastSeen.IsZero() {
 			resp["last_seen"] = lastSeen.Format(time.RFC3339)
+		}
+		// G13：Agent 主机填充系统指标。
+		if metrics := s.svc.AgentHubAgentMetrics(h.AgentID); metrics != "" {
+			resp["metrics"] = metrics
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

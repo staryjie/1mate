@@ -95,6 +95,8 @@ export interface Host {
   instance_count?: number
   // G11：Agent 最后一次收到帧的时间，用于判定连接是否新鲜（非半开）。
   last_seen?: string
+  // G13：Agent 上报的系统指标 JSON（CPU/内存/磁盘/负载）。
+  metrics?: string
 }
 
 export interface Instance {

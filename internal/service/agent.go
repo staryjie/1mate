@@ -42,6 +42,9 @@ const (
 	framePtyResize = "pty_resize"
 	framePtyClose  = "pty_close"
 	framePtyExit   = "pty_exit"
+
+	// G13：系统指标上报帧。
+	frameMetrics   = "metrics"
 )
 
 // 传输分块大小：base64 后约 43KB，远低于 128KB 的单参数上限。
@@ -81,6 +84,9 @@ type wireFrame struct {
 	Mode   string `json:"mode,omitempty"`
 	Seq    int    `json:"seq,omitempty"`
 	B64    string `json:"b64,omitempty"`
+
+	// G13：系统指标（metrics 帧）。
+	Metrics string `json:"metrics,omitempty"`
 }
 
 // AgentResult is the agent→server command result.
@@ -155,6 +161,7 @@ type agentConnection struct {
 	osName  string
 	arch    string
 	ip      string
+	metrics string // G13：最新系统指标 JSON
 
 	// G11：最后一次收到 Agent 帧的时间，用于判定连接是否新鲜（未半开）。
 	lastSeen time.Time
@@ -179,6 +186,11 @@ type AgentHub struct {
 	// onHello 在 Agent 发送 hello 帧（携带 IP、版本、架构）时被调用。
 	// Service 通过此回调将上报的 IP 同步到主机地址字段。
 	onHello func(agentID, ip string)
+
+	// ptyReady 在 pty_start_ok 收到时关闭，供 CreatePtySession 等待（G8）。
+	// hub-level 状态避免连接切换（Agent 重连）导致信号丢失。
+	ptyReadyMu sync.Mutex
+	ptyReady   map[string]chan struct{}
 }
 
 // SetOnHello 设置 hello 帧回调。
@@ -194,7 +206,8 @@ func NewAgentHub(log *slog.Logger) *AgentHub {
 		log = slog.Default()
 	}
 	return &AgentHub{
-		conns: make(map[string]*agentConnection),
+		conns:   make(map[string]*agentConnection),
+		ptyReady: make(map[string]chan struct{}),
 		log:   log,
 	}
 }
@@ -554,6 +567,13 @@ func (h *AgentHub) readLoop(ac *agentConnection) {
 
 		case framePtyStartOk:
 			ac.ptyStartOk(f.CmdID)
+			// G8：hub-level 信号，即使连接随后切换也不会丢失
+			h.ptyReadyMu.Lock()
+			if ch, ok := h.ptyReady[f.CmdID]; ok {
+				close(ch)
+				delete(h.ptyReady, f.CmdID)
+			}
+			h.ptyReadyMu.Unlock()
 
 		case framePtyExit:
 			ac.ptyExit(f.CmdID)
@@ -565,6 +585,11 @@ func (h *AgentHub) readLoop(ac *agentConnection) {
 				continue
 			}
 			ac.ptyOutput(f.CmdID, data)
+
+		case frameMetrics:
+			ac.mu.Lock()
+			ac.metrics = f.Metrics
+			ac.mu.Unlock()
 
 		case frameUpAck, frameUpDone, frameUpError, frameDownChunk, frameDownEnd:
 			ac.mu.Lock()
@@ -782,4 +807,18 @@ func (h *AgentHub) IsConnectedFresh(agentID string, maxAge time.Duration) bool {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	return time.Since(ac.lastSeen) <= maxAge
+}
+
+// AgentMetrics returns the latest system metrics JSON reported by the Agent.
+// Empty string if not connected or no metrics received yet.
+func (h *AgentHub) AgentMetrics(agentID string) string {
+	h.mu.Lock()
+	ac, ok := h.conns[agentID]
+	h.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	return ac.metrics
 }

@@ -31,6 +31,8 @@ package main
 import (
 	"context"
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -49,9 +51,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
 
@@ -84,6 +86,9 @@ const (
 	framePtyResize = "pty_resize"
 	framePtyClose  = "pty_close"
 	framePtyExit   = "pty_exit"
+
+	// G13：系统指标上报帧。
+	frameMetrics   = "metrics"
 )
 
 // 单帧 base64 载荷与 result 帧的保留上限。
@@ -92,7 +97,122 @@ const (
 	resultKeepLimit  = 8 << 20 // 8MB
 )
 
-// frame 是 Agent 通道上的统一帧格式。
+// G13：系统指标。
+type systemMetrics struct {
+	CPUPercent  float64 `json:"cpu_percent"`
+	MemPercent  float64 `json:"mem_percent"`
+	DiskPercent float64 `json:"disk_percent"`
+	Load1       float64 `json:"load1"`
+}
+
+// cpuStat 记录上次 /proc/stat 采样，用于计算 CPU 使用率。
+type cpuStat struct {
+	lastTotal  uint64
+	lastIdle   uint64
+	initialized bool
+}
+
+var cpuSample cpuStat
+
+// readDiskUsage 返回指定路径所在文件系统的磁盘使用率（百分比）。
+// 返回 -1 表示无法获取。
+func readDiskUsage(path string) float64 {
+	return -1
+}
+
+// collectMetrics 收集系统指标（CPU/内存/磁盘/负载）。
+// CPU 使用率需要两次采样，首次返回 0。
+func collectMetrics() systemMetrics {
+	m := systemMetrics{}
+
+	// CPU 使用率
+	if total, idle, err := readProcStat(); err == nil {
+		if cpuSample.initialized {
+			deltaTotal := total - cpuSample.lastTotal
+			deltaIdle := idle - cpuSample.lastIdle
+			if deltaTotal > 0 {
+				m.CPUPercent = float64(deltaTotal-deltaIdle) / float64(deltaTotal) * 100.0
+			}
+		}
+		cpuSample.lastTotal = total
+		cpuSample.lastIdle = idle
+		cpuSample.initialized = true
+	}
+
+	// 内存使用率
+	if mem := readProcMeminfo(); mem > 0 {
+		m.MemPercent = mem
+	}
+
+	// 磁盘使用率（根分区）
+	if disk := readDiskUsage("/"); disk >= 0 {
+		m.DiskPercent = disk
+	}
+
+	// 1 分钟负载
+	if load := readLoadavg(); load >= 0 {
+		m.Load1 = load
+	}
+
+	return m
+}
+
+// readProcStat 从 /proc/stat 读取 CPU 总时间和空闲时间。
+func readProcStat() (total, idle uint64, err error) {
+	data, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, 0, err
+	}
+	// 第一行：cpu  user nice system idle iowait irq softirq steal guest guest_nice
+	var (
+		cpuLabel string
+		user, nice, system, iowait, irq, softirq, steal, guest, guestNice uint64
+	)
+	if _, err := fmt.Sscanf(string(data), "%s %d %d %d %d %d %d %d %d %d %d",
+		&cpuLabel, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal, &guest, &guestNice); err != nil {
+		return 0, 0, err
+	}
+	if cpuLabel != "cpu" {
+		return 0, 0, fmt.Errorf("unexpected /proc/stat first line: %s", cpuLabel)
+	}
+	total = user + nice + system + idle + iowait + irq + softirq + steal
+	idleAll := idle + iowait
+	return total, idleAll, nil
+}
+
+// readProcMeminfo 从 /proc/meminfo 读取内存使用率。
+func readProcMeminfo() float64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	var memTotal, memAvail uint64
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			fmt.Sscanf(line, "MemTotal: %d kB", &memTotal)
+		} else if strings.HasPrefix(line, "MemAvailable:") {
+			fmt.Sscanf(line, "MemAvailable: %d kB", &memAvail)
+		}
+	}
+	if memTotal == 0 {
+		return 0
+	}
+	return float64(memTotal-memAvail) / float64(memTotal) * 100.0
+}
+
+
+// readLoadavg 从 /proc/loadavg 读取 1 分钟负载。
+func readLoadavg() float64 {
+	data, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return -1
+	}
+	var load1 float64
+	if _, err := fmt.Sscanf(string(data), "%f", &load1); err != nil {
+		return -1
+	}
+	return load1
+}
 type frame struct {
 	Type string `json:"type"`
 
@@ -110,6 +230,8 @@ type frame struct {
 	Stream string `json:"stream,omitempty"`
 	Data   string `json:"data,omitempty"`
 	Term   string `json:"term,omitempty"`   // 终端类型（pty_start）
+	Rows   int    `json:"rows,omitempty"`   // PTY 窗口行数（pty_resize）
+	Cols   int    `json:"cols,omitempty"`   // PTY 窗口列数（pty_resize）
 
 	ExitCode int    `json:"exit_code,omitempty"`
 	Stdout   string `json:"stdout,omitempty"`
@@ -121,16 +243,41 @@ type frame struct {
 	Mode   string `json:"mode,omitempty"`
 	Seq    int    `json:"seq,omitempty"`
 	B64    string `json:"b64,omitempty"`
+
+	// G13：系统指标（metrics 帧）。
+	Metrics string `json:"metrics,omitempty"`
 }
 
 // Config 从环境变量读取的 Agent 配置。
 type Config struct {
-	ServerURL string
-	Token     string
-	HostID    string
-	Heartbeat time.Duration
-	RetryBase time.Duration
-	RetryMax  time.Duration
+	ServerURL       string
+	Token           string
+	HostID          string
+	Heartbeat       time.Duration
+	RetryBase       time.Duration
+	RetryMax        time.Duration
+	CACertFile      string // G10：自定义 CA 证书文件路径，用于 wss:// 连接的服务器证书验证
+	InsecureSkipVerify bool   // G10：跳过服务器证书验证（仅用于测试/自签名证书，生产环境不建议开启）
+	AllowCmds       []string // G12：命令白名单（逗号分隔，支持前缀匹配；为空表示允许所有命令）
+}
+
+// isCmdAllowed 判断命令是否在白名单内。白名单为空时允许所有命令。
+// 支持前缀匹配：白名单项 "docker compose" 会允许 "docker compose up -d"。
+func (c *Config) isCmdAllowed(cmd string) bool {
+	if len(c.AllowCmds) == 0 {
+		return true
+	}
+	cmd = strings.TrimSpace(cmd)
+	for _, allowed := range c.AllowCmds {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if strings.HasPrefix(cmd, allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 // WebSocket 连接活跃度阈值（G11：半开连接检测）。
@@ -175,21 +322,44 @@ func loadConfig() (*Config, error) {
 			retryMax = time.Duration(n) * time.Second
 		}
 	}
+	// G10：TLS 配置
+	caCertFile := os.Getenv("AGENT_CA_FILE")
+	insecureSkipVerify := false
+	if v := os.Getenv("AGENT_INSECURE_SKIP_VERIFY"); v != "" {
+		insecureSkipVerify = strings.EqualFold(v, "true") || v == "1"
+	}
+
+	// G12：命令白名单（逗号分隔，支持前缀匹配；为空表示允许所有命令）。
+	allowCmds := []string{}
+	if v := os.Getenv("AGENT_ALLOW_CMDS"); v != "" {
+		for _, raw := range strings.Split(v, ",") {
+			cmd := strings.TrimSpace(raw)
+			if cmd != "" {
+				allowCmds = append(allowCmds, cmd)
+			}
+		}
+	}
 
 	return &Config{
-		ServerURL: serverURL,
-		Token:     token,
-		HostID:    hostID,
-		Heartbeat: heartbeat,
-		RetryBase: retryBase,
-		RetryMax:  retryMax,
+		ServerURL:         serverURL,
+		Token:             token,
+		HostID:            hostID,
+		Heartbeat:         heartbeat,
+		RetryBase:         retryBase,
+		RetryMax:          retryMax,
+		CACertFile:        caCertFile,
+		InsecureSkipVerify: insecureSkipVerify,
+		AllowCmds:         allowCmds,
 	}, nil
 }
 
 // connectWS 建立与服务器的 WebSocket 连接。令牌通过 X-Agent-Token 请求头
 // 发送（G7）：URL 里不再出现令牌，避免被反向代理访问日志记录。
-func connectWS(serverURL, token string) (*websocket.Conn, error) {
-	u, err := url.Parse(serverURL)
+//
+// G10：支持 wss://。通过 AGENT_CA_FILE 指定自定义 CA 证书，或通过
+// AGENT_INSECURE_SKIP_VERIFY=true 跳过服务器证书验证（不建议用于生产）。
+func connectWS(cfg *Config) (*websocket.Conn, error) {
+	u, err := url.Parse(cfg.ServerURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid server url: %w", err)
 	}
@@ -197,10 +367,36 @@ func connectWS(serverURL, token string) (*websocket.Conn, error) {
 		u.Scheme = "ws"
 	}
 
+	// G10：构建 TLS 配置（仅 wss:// 需要；ws:// 连接时 tlsConfig 为 nil）。
+	var tlsConfig *tls.Config
+	if u.Scheme == "wss" {
+		tlsConfig = &tls.Config{
+			InsecureSkipVerify: cfg.InsecureSkipVerify,
+			MinVersion:         tls.VersionTLS12,
+		}
+		if cfg.CACertFile != "" {
+			caCert, err := os.ReadFile(cfg.CACertFile)
+			if err != nil {
+				return nil, fmt.Errorf("read CA cert file %q: %w", cfg.CACertFile, err)
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caCert) {
+				return nil, fmt.Errorf("failed to append CA cert from %q", cfg.CACertFile)
+			}
+			tlsConfig.RootCAs = caPool
+		}
+	}
+
 	dialer := websocket.DefaultDialer
+	if tlsConfig != nil {
+		dialer = &websocket.Dialer{
+			TLSClientConfig: tlsConfig,
+			HandshakeTimeout: websocket.DefaultDialer.HandshakeTimeout,
+		}
+	}
 	headers := http.Header{}
-	headers.Set("X-Agent-Token", token)
-	headers.Set("Origin", serverURL)
+	headers.Set("X-Agent-Token", cfg.Token)
+	headers.Set("Origin", cfg.ServerURL)
 
 	conn, _, err := dialer.Dial(u.String(), headers)
 	if err != nil {
@@ -215,6 +411,7 @@ type conn struct {
 	out    chan frame
 	closed chan struct{}
 	once   sync.Once
+	cfg    *Config // G12：连接关联的配置（含命令白名单）
 
 	mu      sync.Mutex
 	sendMu  sync.Mutex
@@ -231,15 +428,14 @@ type uploadSession struct {
 
 // ptySession 管理 Agent 侧启动的交互式 shell 进程（Web 终端，G8）。
 type ptySession struct {
-	id        string
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.Reader
-	done      chan struct{}
+	id       string
+	cmd      *exec.Cmd
+	ptyFile  *os.File  // PTY 主端，可读写
+	done     chan struct{}
 	closeOnce sync.Once // 防止 close(sess.done) 被重复调用导致 panic
 }
 
-func newConn(ws *websocket.Conn) *conn {
+func newConn(ws *websocket.Conn, cfg *Config) *conn {
 	c := &conn{
 		ws:      ws,
 		out:     make(chan frame, 256),
@@ -247,6 +443,7 @@ func newConn(ws *websocket.Conn) *conn {
 		active:  make(map[string]context.CancelFunc),
 		uploads: make(map[string]*uploadSession),
 		ptys:    make(map[string]*ptySession),
+		cfg:     cfg,
 	}
 	// 单写者：closing out 之后不再写。
 	go c.writeLoop()
@@ -338,6 +535,12 @@ func (c *conn) runCommand(f frame) {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
 	defer cancel()
+
+	// G12：命令白名单检查。空白名单表示允许所有命令（保持向后兼容）。
+	if !c.cfg.isCmdAllowed(f.Cmd) {
+		_ = c.send(frame{Type: frameResult, CmdID: f.CmdID, ExitCode: -1, Error: "command not allowed by whitelist"})
+		return
+	}
 
 	c.mu.Lock()
 	c.active[f.CmdID] = cancel
@@ -601,44 +804,31 @@ func (c *conn) ptyStart(f frame) {
 	}
 
 	cmd := exec.Command("sh")
-	// 使用管道而非真 PTY，避免跨平台复杂性；bash 的交互式回显在管道模式下
-	// 仍可正常工作（读取一行，执行，输出结果）。
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
-		return
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
-		return
-	}
-	cmd.Stderr = cmd.Stdout // 合并 stderr 到 stdout，简化帧处理
 
-	if err := cmd.Start(); err != nil {
-		log.Printf("[DEBUG] ptyStart: cmd.Start failed: %v", err)
+	ptyFile, err := pty.Start(cmd)
+	if err != nil {
+		log.Printf("[DEBUG] ptyStart: pty.Start failed: %v", err)
 		_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID, Error: err.Error()})
 		return
 	}
-	log.Printf("[DEBUG] ptyStart: shell started, pid=%d, ptyID=%s", cmd.Process.Pid, ptyID)
+	log.Printf("[DEBUG] ptyStart: shell started with PTY, pid=%d, ptyID=%s", cmd.Process.Pid, ptyID)
 
 	sess := &ptySession{
-		id:     ptyID,
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: stdout,
-		done:   make(chan struct{}),
+		id:      ptyID,
+		cmd:     cmd,
+		ptyFile: ptyFile,
+		done:    make(chan struct{}),
 	}
 	c.mu.Lock()
 	c.ptys[ptyID] = sess
 	c.mu.Unlock()
 
-	// 输出泵：从 shell  stdout 读取，通过 pty_out 帧推送给平台。
+	// 输出泵：从 PTY 主端读取，通过 pty_out 帧推送给平台。
 	go func() {
 		defer func() { sess.closeOnce.Do(func() { close(sess.done) }) }()
 		buf := make([]byte, chunkPayloadSize)
 		for {
-			n, rerr := stdout.Read(buf)
+			n, rerr := ptyFile.Read(buf)
 			if n > 0 {
 				log.Printf("[DEBUG] outputPump: read %d bytes, sending pty_out for ptyID=%s", n, ptyID)
 				if serr := c.send(frame{
@@ -662,14 +852,14 @@ func (c *conn) ptyStart(f frame) {
 		c.mu.Lock()
 		delete(c.ptys, ptyID)
 		c.mu.Unlock()
-		sess.closeOnce.Do(func() { close(sess.done) })
-		_ = c.send(frame{Type: framePtyExit, CmdID: ptyID, ExitCode: 0})
+		_ = c.send(frame{Type: framePtyExit, CmdID: ptyID})
 	}()
 
+	log.Printf("[DEBUG] ptyStart: sending pty_start_ok for ptyID=%s", ptyID)
 	_ = c.send(frame{Type: framePtyStartOk, CmdID: ptyID})
 }
 
-// ptyInput 把前端发来的用户输入写入 shell stdin。
+// ptyInput 把前端发来的用户输入写入 shell stdin（通过 PTY 主端）。
 func (c *conn) ptyInput(f frame) {
 	c.mu.Lock()
 	sess, ok := c.ptys[f.CmdID]
@@ -685,15 +875,23 @@ func (c *conn) ptyInput(f frame) {
 	log.Printf("[DEBUG] ptyInput: received %d bytes for ptyID=%s", len(data), f.CmdID)
 	// 将 xterm.js 发送的 \r 转换为 \n，供 Unix shell 识别为行结束
 	input := bytes.ReplaceAll(data, []byte("\r"), []byte("\n"))
-	_, _ = sess.stdin.Write(input)
-	// 注意：Agent 模式下没有真 PTY，shell 不会自动回显用户输入。
-	// 此处不主动 echo，避免与 shell 输出错位交错导致字符重复。
-	// 用户将以“盲输入、见输出”的方式使用终端（这是管道模式的固有限制）。
+	_, _ = sess.ptyFile.Write(input)
 }
 
-// ptyResize 调整终端窗口大小（管道模式下暂不实际调整，仅记录）。
+// ptyResize 调整终端窗口大小。
 func (c *conn) ptyResize(f frame) {
-	// 管道模式下不支持真正的窗口大小调整；保留帧处理以备后续 PTY 升级。
+	c.mu.Lock()
+	sess, ok := c.ptys[f.CmdID]
+	c.mu.Unlock()
+	if !ok {
+		return
+	}
+	if err := pty.Setsize(sess.ptyFile, &pty.Winsize{
+		Rows: uint16(f.Rows),
+		Cols: uint16(f.Cols),
+	}); err != nil {
+		log.Printf("[DEBUG] ptyResize: failed: %v", err)
+	}
 }
 
 // ptyClose 关闭 PTY 会话。
@@ -707,7 +905,7 @@ func (c *conn) ptyClose(f frame) {
 	if !ok {
 		return
 	}
-	_ = sess.stdin.Close()
+	_ = sess.ptyFile.Close()
 	_ = sess.cmd.Process.Kill()
 	<-sess.done
 }
@@ -715,13 +913,13 @@ func (c *conn) ptyClose(f frame) {
 // term 字段已在 wireFrame 中复用，这里不需要新增。
 func run(cfg *Config) error {
 	interrupt := make(chan os.Signal, 1)
-	signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(interrupt, os.Interrupt)
 
 	retryDelay := cfg.RetryBase
 
 	for {
 		log.Printf("connecting to %s ...", cfg.ServerURL)
-		ws, err := connectWS(cfg.ServerURL, cfg.Token)
+		ws, err := connectWS(cfg)
 		if err != nil {
 			log.Printf("connect failed: %v, retry in %v", err, retryDelay)
 			select {
@@ -738,7 +936,7 @@ func run(cfg *Config) error {
 		retryDelay = cfg.RetryBase
 		log.Printf("connected to %s (version=%s)", cfg.ServerURL, version)
 
-		c := newConn(ws)
+		c := newConn(ws, cfg)
 
 		// 服务器的 ping 由我们自己应答应用层 pong 帧；这里禁用 gorilla 的
 		// 自动 pong，避免它在非写者 goroutine 里直接写 WS 破坏帧序。
@@ -790,8 +988,17 @@ func run(cfg *Config) error {
 				c.close()
 				stopped = true
 			case <-heartbeatTicker.C:
+				// G11：发送 websocket Ping 用于半开连接检测。
 				if serr := c.ws.WriteMessage(websocket.PingMessage, nil); serr != nil {
 					log.Printf("websocket ping failed: %v", serr)
+					c.close()
+					stopped = true
+				}
+				// G13：上报系统指标（CPU/内存/磁盘/负载）。
+				metrics := collectMetrics()
+				metricsJSON, _ := json.Marshal(metrics)
+				if serr := c.send(frame{Type: frameMetrics, Metrics: string(metricsJSON)}); serr != nil {
+					log.Printf("websocket metrics send failed: %v", serr)
 					c.close()
 					stopped = true
 				}

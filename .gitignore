@@ -41,7 +41,9 @@ Thumbs.db
 
 # Agent client binary
 /agent/1mate-agent*
+/agent/bin/
 /agent/*.exe
 
 # Release staging (temporary packaging directory)
 /release-staging/
+

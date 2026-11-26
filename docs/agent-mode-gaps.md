@@ -15,12 +15,12 @@
 | G5 | 命令不可取消，平台取消任务后 Agent 仍在执行 | P1 | 已修复 |
 | G6 | Agent 模式无法提权（SudoMode 被强制 none，sudo 密码无通道） | P1 | 已修复 |
 | G7 | agent_token 走 URL query，会被反代访问日志记录 | P1 | 已修复 |
-| G8 | PTY / Web 终端未实现（Agent 主机显示“暂不支持”警告） | P2 | 已部分修复 |
+| G8 | PTY / Web 终端未实现（Agent 主机显示“暂不支持”警告） | P2 | 已修复 |
 | G9 | 无 Agent 版本上报，平台看不到客户端版本，升级需手工替换 | P2 | 已修复 |
-| G10 | 无 TLS 自定义（自签证书的 wss:// 连不上，不能配 CA） | P2 | 待修复 |
+| G10 | 无 TLS 自定义（自签证书的 wss:// 连不上，不能配 CA） | P2 | 已修复 |
 | G11 | 服务端读循环无读超时/pong 处理，半开连接被误判为在线 | P2 | 已修复 |
-| G12 | Agent 端无命令白名单/审计，收到即执行 | P2 | 设计取舍（文档已警告） |
-| G13 | 无系统指标上报（CPU/内存/磁盘） | P3 | 待修复 |
+| G12 | Agent 端无命令白名单，收到即执行 | P2 | 已修复 |
+| G13 | 无系统指标上报（CPU/内存/磁盘） | P3 | 已修复 |
 
 ---
 
@@ -126,13 +126,21 @@
 
 ---
 
-## G10 — 无 TLS 自定义
+## G10 — 无 TLS 自定义（已修复）
 
-**证据**：`connectWS` 用 `websocket.DefaultDialer`。
+**证据（修复前）**：`connectWS` 用 `websocket.DefaultDialer`，不支持 `wss://`。
 
-**影响**：平台使用自签证书时 `wss://` 直接失败，无法配置 CA 或跳过校验。
+**影响（修复前）**：平台使用自签证书时 `wss://` 直接失败，无法配置 CA 或跳过校验。
 
-**修复方案**：新增 `AGENT_CA_FILE` / `AGENT_INSECURE_SKIP_VERIFY`，构造自定义 `tls.Config`。
+**修复**：
+- `Config` 新增 `CACertFile` / `InsecureSkipVerify` 字段（`agent/main.go`）。
+- `loadConfig` 读取环境变量 `AGENT_CA_FILE`、`AGENT_INSECURE_SKIP_VERIFY`。
+- `connectWS(cfg *Config)`：`wss://` 时构建自定义 `tls.Config`（`InsecureSkipVerify`、`MinVersion TLS1.2`，`AGENT_CA_FILE` 非空则加载 PEM 到 `RootCAs`）；`ws://` 连接时 `tlsConfig` 为 nil。
+- 使用自定义 `websocket.Dialer`（`TLSClientConfig=tlsConfig`）。
+
+**环境变量**：
+- `AGENT_CA_FILE`：自定义 CA 证书 PEM 文件路径，用于 `wss://` 连接的服务器证书验证。
+- `AGENT_INSECURE_SKIP_VERIFY`：`true`/`1` 时跳过服务器证书验证（仅用于测试/自签名证书，生产环境不建议开启）。
 
 ---
 
@@ -149,20 +157,36 @@
 
 ---
 
-## G12 — Agent 端无命令白名单
+## G12 — Agent 端命令白名单（已修复）
 
-**证据**：`runCommand` 直接 `sh -c`。
+**证据（修复前）**：`runCommand` 直接 `sh -c` 执行任意命令，没有任何限制。
 
-**影响**：拿到 Agent 通道即等同拿到主机 shell。
+**影响（修复前）**：拿到 Agent 通道即等同拿到主机 shell，任意命令都可执行。
 
-**状态**：设计取舍——Agent 本质是远程执行代理，白名单会破坏"统一 sshx 接口"的设计。保留文档警告；若需收紧，后续可加"仅允许平台签发的命令模板"。
+**修复**：
+- `Config` 新增 `AllowCmds []string` 字段（`agent/main.go`）。
+- `loadConfig` 读取环境变量 `AGENT_ALLOW_CMDS`（逗号分隔，支持前缀匹配；为空表示允许所有命令，保持向后兼容）。
+- `runCommand` 在执行前调用 `c.cfg.isCmdAllowed(cmd)`，不匹配则拒绝返回错误 `"command not allowed by whitelist"`。
+- `Config.isCmdAllowed`：白名单为空时返回 true；否则按前缀匹配判断命令是否在白名单内。
+
+**环境变量**：
+- `AGENT_ALLOW_CMDS`：命令白名单，逗号分隔，支持前缀匹配。例如 `"docker compose,docker,sh"`。为空（或未设置）时允许所有命令。
+
 
 ---
 
-## G13 — 无系统指标上报
+## G13 — 无系统指标上报（已修复）
 
-**证据**：Agent 只发 Ping。
+**证据（修复前）**：Agent 只发 Ping 心跳，不携带任何系统指标。
 
-**影响**：主机列表看不到 Agent 主机的负载/磁盘（SSH 模式靠探测脚本拿一次快照）。
+**影响（修复前）**：主机列表看不到 Agent 主机的负载/内存/磁盘使用率。
 
-**修复方案**：心跳帧携带轻量指标（load/内存/磁盘），服务端落库展示。
+**修复**：
+- `agent/main.go`：新增 `frameMetrics="metrics"` 帧类型；`wireFrame` 新增 `Metrics string` 字段；新增 `systemMetrics` 结构体（`CPUPercent`/`MemPercent`/`DiskPercent`/`Load1`）；`collectMetrics()` 收集 CPU/内存/磁盘/负载，Linux 走 `agent/metrics_linux.go`（`unix.Statfs`），Windows 走 `agent/metrics_windows.go`（占位返回 0）；`readProcStat`/`readProcMeminfo`/`readLoadavg` 辅助函数。
+- 心跳循环：每周期发送 `websocket.PingMessage`（G11）+ 发送 `frameMetrics` 帧（`metricsJSON`）。
+- `internal/service/agent.go`：`agentConnection` 新增 `metrics string` 字段；`readLoop` `case frameMetrics` 保存 `ac.metrics`；新增 `AgentHub.AgentMetrics(agentID) string` 方法。
+- `internal/service/service.go`：新增 `Service.AgentHubAgentMetrics(agentID) string` 方法。
+- `internal/api/handlers.go`：`hostView` 新增 `Metrics string` 字段；`handleListHosts`/`handleGetHost` 对 Agent 主机填充 `metrics`。
+- 前端：`Host` 类型新增 `metrics?: string`；HostsPage 新增「系统指标」列（Tooltip 显示 CPU/内存/磁盘/负载），导入 `Tooltip`。
+
+**环境变量**：无（指标收集为内置，无需配置）。

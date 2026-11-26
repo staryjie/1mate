@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { App, Button, Drawer, Form, Input, InputNumber, Radio, Select, Space, Table, Tag, Typography } from 'antd'
+import { App, Button, Drawer, Form, Input, InputNumber, Radio, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { DeleteOutlined, PlusOutlined, ReloadOutlined, ApiOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
@@ -255,6 +255,30 @@ export default function HostsPage() {
                 return <Tag color="warning">可能已断开</Tag>
               }
               return <Tag color="success">已连接</Tag>
+            },
+          },
+          {
+            title: '系统指标',
+            width: 200,
+            render: (_, r) => {
+              if (r.connection_type !== 'agent') return '—'
+              if (!r.metrics) return <Tag color="orange">未上报</Tag>
+              try {
+                const m = JSON.parse(r.metrics)
+                const cpu = typeof m.cpu_percent === 'number' ? m.cpu_percent.toFixed(1) : '?'
+                const mem = typeof m.mem_percent === 'number' ? m.mem_percent.toFixed(1) : '?'
+                const disk = typeof m.disk_percent === 'number' ? m.disk_percent.toFixed(1) : '?'
+                const load = typeof m.load1 === 'number' ? m.load1.toFixed(2) : '?'
+                return (
+                  <Tooltip title={`CPU: ${cpu}%  内存: ${mem}%  磁盘: ${disk}%  负载: ${load}`}>
+                    <Tag color="blue">
+                      CPU {cpu}% / 内存 {mem}% / 磁盘 {disk}%
+                    </Tag>
+                  </Tooltip>
+                )
+              } catch {
+                return <Tag color="orange">解析失败</Tag>
+              }
             },
           },
           { title: 'sudo', dataIndex: 'sudo_mode' },
